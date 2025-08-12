@@ -1,12 +1,13 @@
 // ==UserScript==
-// @name         ChatGPT → GitHub Commit Bridge (no-fallback) v1.4.4
+// @name         ChatGPT → GitHub Commit Bridge (no-fallback) v1.4.5
 // @namespace    https://github.com/BazookaJoe58/Torn-scripts
-// @version      1.4.4
-// @description  One-click “Commit → GitHub” for ChatGPT code blocks. Button shows immediately; turns green when the code stops updating. Strict: commits only if a target is auto-detected from @updateURL/@downloadURL/@commit-to in the header.
+// @version      1.4.5
+// @description  One-click “Commit → GitHub” for ChatGPT code blocks. Shows per-block button immediately; turns green when code stops updating. Also adds a global toolbar button as a fallback. Strict: commits only if a target is auto-detected from @updateURL/@downloadURL/@commit-to in the header.
 // @author       BazookaJoe
 // @license      MIT
 // @match        https://chat.openai.com/*
 // @match        https://chatgpt.com/*
+// @run-at       document-idle
 // @grant        GM_addStyle
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -15,18 +16,19 @@
 // @connect      api.github.com
 // @homepageURL  https://github.com/BazookaJoe58/Torn-scripts
 // @supportURL   https://github.com/BazookaJoe58/Torn-scripts/issues
-// @downloadURL  https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/chat%20GPT%20commit%20bridge/chatgpt-github-commit-bridge-nofallback-v1.4.4.user.js
-// @updateURL    https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/chat%20GPT%20commit%20bridge/chatgpt-github-commit-bridge-nofallback-v1.4.4.user.js
+// @downloadURL  https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/chat%20GPT%20commit%20bridge/chatgpt-github-commit-bridge-nofallback-v1.4.5.user.js
+// @updateURL    https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/chat%20GPT%20commit%20bridge/chatgpt-github-commit-bridge-nofallback-v1.4.5.user.js
 // ==/UserScript==
 
 (() => {
   'use strict';
 
-  // --- Singleton guard (prevents double buttons if multiple versions are installed) ---
+  // ---- Singleton guard ----
   if (window.__GHCB_SINGLETON__) return;
   window.__GHCB_SINGLETON__ = true;
 
   const QUIET_MS = 900; // time without code text changes before "Ready"
+  const GLOBAL_BTN_ID = 'ghcb-global-btn';
 
   GM_addStyle(`
     .ghcb-wrap{position:relative}
@@ -42,6 +44,7 @@
     }
     .ghcb-btn:hover.ready{opacity:1; filter:brightness(1.05)}
     .ghcb-btn:active.ready{transform:scale(.98)}
+
     .ghcb-toast{
       position:fixed; right:14px; bottom:14px; max-width:60ch;
       background:#111; color:#eee; border:1px solid #444; border-radius:10px;
@@ -49,6 +52,15 @@
       font: 13px/1.45 system-ui,Segoe UI,Arial;
     }
     .ghcb-toast b{color:#8ef}
+
+    /* Global toolbar button (fallback) */
+    #${GLOBAL_BTN_ID}{
+      position:fixed; top:12px; right:12px;
+      padding:6px 10px; border-radius:8px; border:1px solid #6aa1ff;
+      background:#0b1a33; color:#cfe1ff; font:600 12px/1 system-ui,Segoe UI,Arial;
+      cursor:pointer; z-index:2147483647; opacity:.95;
+    }
+    #${GLOBAL_BTN_ID}:hover{opacity:1; filter:brightness(1.05)}
   `);
 
   const toast = (html, ms=3600) => {
@@ -70,6 +82,7 @@
     }
   });
 
+  // ---- Target auto-detect ----
   function detectTargetFromHeader(src) {
     const find = (re) => (src.match(re) || [])[1];
     const candidates = [
@@ -91,6 +104,7 @@
     return null;
   }
 
+  // ---- GitHub API ----
   function ghGET(url, token) {
     return new Promise((res, rej) => {
       GM_xmlhttpRequest({
@@ -131,50 +145,47 @@
     }
   }
 
-  // --- Code block discovery (canonicalize to the <pre> host if available) ---
-  function discoverBlocks(root=document) {
-    const blocks = new Set();
+  // ---- Block discovery ----
+  function findBlocks() {
+    const blocks = [];
 
+    // Standard: <pre><code>
     document.querySelectorAll('pre').forEach(pre => {
       const code = pre.querySelector('code');
-      if (code) blocks.add(JSON.stringify({k: 'pre', i: pre}));
+      if (code) blocks.push({host: pre, code});
     });
 
+    // Newer testid wrapper
     document.querySelectorAll('div[data-testid="code"]').forEach(w => {
       const pre = w.querySelector('pre');
       const code = w.querySelector('pre code');
-      if (code && pre) blocks.add(JSON.stringify({k: 'pre', i: pre}));
+      if (pre && code) blocks.push({host: pre, code});
     });
 
-    // Fallback big <code> when there's no <pre>
+    // Fallback: large <code> with no <pre>
     document.querySelectorAll('code').forEach(code => {
-      if (code.closest('pre')) return; // already handled
+      if (code.closest('pre')) return;
       if ((code.textContent || '').length > 60) {
         const host = code.closest('figure,div') || code;
-        blocks.add(JSON.stringify({k: 'host', i: host, c: code}));
+        blocks.push({host, code});
       }
     });
 
-    // Unpack to {host, code}
-    const out = [];
-    blocks.forEach(s => {
-      const o = JSON.parse(s);
-      if (o.k === 'pre') {
-        const pre = o.i;
-        const code = pre.querySelector('code');
-        if (pre && code) out.push({host: pre, code});
-      } else {
-        out.push({host: o.i, code: o.c || (o.i.querySelector && o.i.querySelector('code'))});
-      }
-    });
-    return out;
+    // Dedup
+    const uniq = [];
+    const seen = new WeakSet();
+    for (const b of blocks) {
+      if (!b.host || seen.has(b.host)) continue;
+      seen.add(b.host);
+      uniq.push(b);
+    }
+    return uniq;
   }
 
-  // --- Wire one block (de-dup & stability only on <code>) ---
+  // ---- Per-block wiring (watch only the <code> node for stability) ----
   function wireBlock(host, codeEl) {
     if (!host || !codeEl) return;
-    // If we already added a button to this block, bail
-    if (host.querySelector('.ghcb-btn')) return;
+    if (host.querySelector('.ghcb-btn')) return; // already has a button
 
     host.classList.add('ghcb-wrap');
     if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
@@ -198,15 +209,14 @@
     };
     setReady(false);
 
-    // Observe ONLY the code element’s text/children (ignore our own button & other chrome)
     const mo = new MutationObserver(() => {
       setReady(false);
       clearTimeout(timer);
       timer = setTimeout(() => setReady(true), QUIET_MS);
     });
-    mo.observe(codeEl, {childList: true, characterData: true, subtree: true});
+    mo.observe(codeEl, {childList:true, characterData:true, subtree:true});
 
-    // Initial kick if already stable
+    // If already stable, go ready shortly
     timer = setTimeout(() => setReady(true), QUIET_MS);
 
     btn.addEventListener('click', async (e) => {
@@ -214,20 +224,11 @@
       const code = codeEl.textContent || '';
       if (!code.trim()) { toast('No code detected in this block.'); return; }
       if (!ready) { toast('⌛ Still updating. Wait until the button turns green.'); return; }
-
       const target = detectTargetFromHeader(code);
-      if (!target) {
-        toast('❌ <b>No target detected.</b><br>Add @updateURL/@downloadURL/@commit-to.');
-        return;
-      }
-
+      if (!target) { toast('❌ <b>No target detected.</b> Add @updateURL/@downloadURL/@commit-to.'); return; }
       const msgDefault = `Update ${target.path}`;
-      const message = prompt(
-        `Commit message for ${target.owner}/${target.repo}\nbranch ${target.branch}\n${target.path}:`,
-        msgDefault
-      );
+      const message = prompt(`Commit message for ${target.owner}/${target.repo}\nbranch ${target.branch}\n${target.path}:`, msgDefault);
       if (message === null) return;
-
       try {
         setReady(false);
         btn.textContent = 'Committing…';
@@ -244,10 +245,56 @@
   }
 
   function scan() {
-    discoverBlocks().forEach(({host, code}) => wireBlock(host, code));
+    const blocks = findBlocks();
+    blocks.forEach(({host, code}) => wireBlock(host, code));
   }
 
-  // Initial + live
-  scan();
-  new MutationObserver(scan).observe(document.body, {childList: true, subtree: true});
+  // ---- Global toolbar button (fallback if per-block button fails) ----
+  function ensureGlobalButton() {
+    if (document.getElementById(GLOBAL_BTN_ID)) return;
+    const b = document.createElement('button');
+    b.id = GLOBAL_BTN_ID;
+    b.textContent = 'Commit current code…';
+    b.title = 'Commits the biggest visible code block on the page';
+    b.addEventListener('click', async () => {
+      const blocks = findBlocks();
+      if (!blocks.length) { toast('No code blocks found on this page.'); return; }
+      // Pick the largest code block (by text length)
+      let best = blocks[0], max = (best.code.textContent || '').length;
+      for (const bl of blocks) {
+        const len = (bl.code.textContent || '').length;
+        if (len > max) { best = bl; max = len; }
+      }
+      const code = best.code.textContent || '';
+      const target = detectTargetFromHeader(code);
+      if (!target) { toast('❌ No target detected in the largest block. Add @updateURL/@downloadURL/@commit-to.'); return; }
+      const msgDefault = `Update ${target.path}`;
+      const message = prompt(`Commit message for ${target.owner}/${target.repo}\nbranch ${target.branch}\n${target.path}:`, msgDefault);
+      if (message === null) return;
+      try {
+        toast('⏳ Committing…');
+        await commitToGitHub({...target, content: code, message: message || msgDefault});
+        toast(`✅ Committed to ${target.owner}/${target.repo}<br>${target.path}`);
+      } catch (err) {
+        console.error(err);
+        toast('❌ Commit failed.');
+      }
+    });
+    document.body.appendChild(b);
+  }
+
+  // ---- Init ----
+  function init() {
+    ensureGlobalButton();
+    scan();
+    // Observe the whole page for new code blocks
+    new MutationObserver(() => { ensureGlobalButton(); scan(); })
+      .observe(document.body, {childList:true, subtree:true});
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init, {once:true});
+  } else {
+    init();
+  }
 })();
