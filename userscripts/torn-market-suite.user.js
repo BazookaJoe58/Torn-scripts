@@ -25,8 +25,6 @@
 // @supportURL   https://github.com/BazookaJoe58/Torn-scripts/issues
 // @downloadURL  https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/torn-market-suite.user.js
 // @updateURL    https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/torn-market-suite.user.js
-// @downloadURL  https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/main/userscripts/torn-market-view-green-button.user.js
-// @updateURL    https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/main/userscripts/torn-market-view-green-button.user.js
 // ==/UserScript==
 
 (function () {
