@@ -1,83 +1,39 @@
+// PATH: userscripts/torn-market-suite.user.js
+// COMMIT: chore: bump to v0.1.4 (confirm auto-update)
+
 // ==UserScript==
+// @name         Torn Market Suite (Starter)
+// @namespace    https://github.com/BazookaJoe58/Torn-scripts
+// @version      0.1.4
+// @description  Starter scaffold; updates from GitHub raw
+// @author       BazookaJoe
+// @license      MIT
+// @match        https://www.torn.com/*
 // @name         Torn Market: View Listing Green Button (test)
 // @namespace    https://github.com/<your-username>/<your-repo>
-// @version      0.2.0
-// @description  Adds a small green ✓ button next to each price input on View Listing (does nothing yet). Includes TM menu to set an API key.
+// @version      0.1.2
+// @description  Adds a small green ✓ button next to each price input on View Listing (does nothing yet).
 // @author       You
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://*.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
 // @grant        GM_addStyle
-// @grant        GM_registerMenuCommand
-// @grant        GM_getValue
-// @grant        GM_setValue
-// @grant        GM_notification
+// @homepageURL  https://github.com/BazookaJoe58/Torn-scripts
+// @supportURL   https://github.com/BazookaJoe58/Torn-scripts/issues
+// @downloadURL  https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/torn-market-suite.user.js
+// @updateURL    https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/torn-market-suite.user.js
 // @downloadURL  https://raw.githubusercontent.com/<your-username>/<your-repo>/main/torn-market-view-green-button.user.js
 // @updateURL    https://raw.githubusercontent.com/<your-username>/<your-repo>/main/torn-market-view-green-button.user.js
 // ==/UserScript==
 
 (function () {
   'use strict';
+  const tag = document.createElement('div');
+  tag.textContent = 'TMS v0.1.4';
+  tag.style.cssText = 'position:fixed;bottom:8px;right:8px;padding:4px 8px;font:12px/1.2 system-ui;border:1px solid #999;border-radius:6px;background:#fff;opacity:.9;z-index:999999;';
+  document.body.appendChild(tag);
+  setTimeout(() => tag.remove(), 3000);
 
-  // ===== API KEY STORAGE =====
-  const KEY_NAME = 'tmk_api_key';
-
-  function getApiKey() {
-    return (GM_getValue(KEY_NAME, '') || '').trim();
-  }
-  function maskKey(k) {
-    if (!k) return '(not set)';
-    return k.length <= 8 ? '****' : `${k.slice(0, 4)}…${k.slice(-4)}`;
-  }
-  function isLikelyTornKey(k) {
-    return /^[A-Za-z0-9]{16}$/.test(k);
-  }
-  function setApiKeyFlow() {
-    const current = getApiKey();
-    const input = prompt(
-      `Enter your PUBLIC Torn API key (16 chars):`,
-      current || ''
-    );
-    if (input === null) return; // cancelled
-    const trimmed = input.trim();
-    if (!isLikelyTornKey(trimmed)) {
-      alert('That does not look like a valid 16-char key. Try again.');
-      return;
-    }
-    GM_setValue(KEY_NAME, trimmed);
-    try {
-      GM_notification({
-        title: 'Torn Market (test)',
-        text: `API key saved: ${maskKey(trimmed)}`,
-        timeout: 3000,
-      });
-    } catch {
-      alert(`API key saved: ${maskKey(trimmed)}`);
-    }
-  }
-  function clearApiKeyFlow() {
-    const had = getApiKey();
-    GM_setValue(KEY_NAME, '');
-    try {
-      GM_notification({
-        title: 'Torn Market (test)',
-        text: had ? 'API key cleared.' : 'No API key was set.',
-        timeout: 2500,
-      });
-    } catch {
-      alert(had ? 'API key cleared.' : 'No API key was set.');
-    }
-  }
-
-  // Register Tampermonkey menu commands (show in the dropdown)
-  try {
-    GM_registerMenuCommand(`Set API Key (current: ${maskKey(getApiKey())})`, setApiKeyFlow);
-    GM_registerMenuCommand('Clear API Key', clearApiKeyFlow);
-  } catch (e) {
-    console.warn('[TMK View Test] Menu registration failed:', e);
-  }
-
-  // ===== UI: Green Button (no-op) =====
   GM_addStyle(`
     .tmk-green-pill{
       display:inline-flex;align-items:center;justify-content:center;
@@ -96,6 +52,7 @@
     const group = priceWrapperEl.querySelector('.input-money-group');
     if (!group) return;
 
+    // Prevent duplicates
     if (group.querySelector('.tmk-green-pill')) {
       priceWrapperEl.dataset.tmkGreenInjected = '1';
       return;
@@ -107,15 +64,15 @@
     pill.setAttribute('aria-label', 'Green test button');
     pill.textContent = '✓';
     pill.addEventListener('click', () => {
-      console.log('[TMK Green] click (no-op). API key status:', maskKey(getApiKey()));
+      console.log('[TMK Green] click (no-op)');
     });
 
     const priceInput = group.querySelector('.input-money');
     if (priceInput) {
-      // Place on the RIGHT of the price input
+      // Insert on the RIGHT side of the price input
       group.insertBefore(pill, priceInput.nextSibling);
     } else {
-      group.appendChild(pill);
+      group.appendChild(pill); // fallback
     }
 
     priceWrapperEl.dataset.tmkGreenInjected = '1';
@@ -125,6 +82,7 @@
     if (!isViewListing()) return;
     const root = document.querySelector('#item-market-root');
     if (!root) return;
+
     const priceWrappers = $all(root, '[class^=viewListingWrapper___] [class^=priceInputWrapper___]');
     priceWrappers.forEach(injectGreenButton);
   }
