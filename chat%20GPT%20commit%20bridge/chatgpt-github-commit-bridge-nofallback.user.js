@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ChatGPT → GitHub Commit Bridge (no-fallback) v1.4.2
+// @name         ChatGPT → GitHub Commit Bridge (no-fallback) v1.4.3
 // @namespace    https://github.com/BazookaJoe58/Torn-scripts
-// @version      1.4.2
-// @description  One-click “Commit → GitHub” for ChatGPT code blocks. STRICT: commits only when a target is auto-detected from @updateURL/@downloadURL/@commit-to in the code header. Otherwise it aborts.
+// @version      1.4.3
+// @description  One-click “Commit → GitHub” for ChatGPT code blocks. Shows immediately; turns green when the block stops updating. Strict: commits only if a target is auto-detected from @updateURL/@downloadURL/@commit-to in the header.
 // @author       BazookaJoe
 // @license      MIT
 // @match        https://chat.openai.com/*
@@ -22,16 +22,23 @@
 (() => {
   'use strict';
 
+  const QUIET_MS = 900; // how long code must be unchanged to be "ready"
+
   // ---------- Styles ----------
   GM_addStyle(`
     .ghcb-wrap{position:relative}
     .ghcb-btn{
       position:absolute; top:8px; right:8px;
       font:600 12px/1.2 system-ui,Segoe UI,Arial;
-      padding:6px 10px; border:1px solid #2f6; border-radius:7px;
-      background:#102; color:#2f6; cursor:pointer; opacity:.95; z-index:2147483647;
+      padding:6px 10px; border:1px solid #888; border-radius:7px;
+      background:#444; color:#fff; cursor:not-allowed; opacity:.95; z-index:2147483647;
+      transition:background .15s ease,border-color .15s ease,opacity .15s ease,transform .05s ease;
     }
-    .ghcb-btn:hover{opacity:1; filter:brightness(1.06)}
+    .ghcb-btn.ready{
+      background:#28a745; border-color:#1f7a34; cursor:pointer;
+    }
+    .ghcb-btn:hover.ready{opacity:1; filter:brightness(1.05)}
+    .ghcb-btn:active.ready{transform:scale(.98)}
     .ghcb-toast{
       position:fixed; right:14px; bottom:14px; max-width:60ch;
       background:#111; color:#eee; border:1px solid #444; border-radius:10px;
@@ -117,7 +124,6 @@
 
     const base = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path).replace(/%2F/g,'/')}`;
 
-    // Check existing file to get sha (ok if 404)
     let sha;
     const probe = await ghGET(`${base}?ref=${encodeURIComponent(branch)}`, token);
     if (probe.status === 200 && probe.json && probe.json.sha) sha = probe.json.sha;
@@ -129,26 +135,25 @@
     }
   }
 
-  // ---------- Code block detection & button wiring ----------
-  const seen = new WeakSet();
+  // ---------- Code block detection ----------
+  const wired = new WeakSet();
 
-  // Robust block finder: returns a DOM element we can attach to and its code text.
   function findBlocks(root=document) {
     const blocks = [];
 
-    // 1) Standard: figure > div > pre > code OR pre > code
+    // Standard: pre > code (incl. figure wrappers)
     root.querySelectorAll('pre').forEach(pre => {
       const code = pre.querySelector('code');
       if (code) blocks.push({host: pre, code});
     });
 
-    // 2) Newer testid container: div[data-testid="code"] > pre > code
+    // Newer: div[data-testid="code"] > pre > code
     root.querySelectorAll('div[data-testid="code"]').forEach(w => {
       const code = w.querySelector('pre code');
       if (code) blocks.push({host: w.querySelector('pre') || w, code});
     });
 
-    // 3) Fallback: any code element that looks like a big block (long text)
+    // Fallback: any big <code>
     root.querySelectorAll('code').forEach(code => {
       if (code.textContent && code.textContent.length > 60) {
         const host = code.closest('pre,figure,div') || code;
@@ -167,20 +172,66 @@
     return uniq;
   }
 
-  function addButton(host, codeEl) {
-    if (!host || seen.has(host)) return;
-    seen.add(host);
+  function markReady(btn, ready) {
+    if (ready) {
+      btn.classList.add('ready');
+      btn.textContent = 'Commit → GitHub (Ready)';
+    } else {
+      btn.classList.remove('ready');
+      btn.textContent = 'Commit → GitHub (Writing…)';
+    }
+  }
+
+  function wireBlock(host, codeEl) {
+    if (!host || wired.has(host)) return;
+    wired.add(host);
     host.classList.add('ghcb-wrap');
+
+    // Ensure host can anchor absolute positioning
+    const style = getComputedStyle(host);
+    if (style.position === 'static') host.style.position = 'relative';
 
     const btn = document.createElement('button');
     btn.className = 'ghcb-btn';
-    btn.textContent = 'Commit → GitHub';
-    btn.title = 'Commit this code block to GitHub';
+    btn.textContent = 'Commit → GitHub (Writing…)';
+    host.appendChild(btn);
 
+    // Per-block stability watcher
+    let lastChange = Date.now();
+    let ready = false;
+    const setReady = (v) => {
+      ready = v;
+      markReady(btn, ready);
+    };
+
+    // Initial state: show immediately but disabled (not ready)
+    setReady(false);
+
+    const mo = new MutationObserver(() => {
+      lastChange = Date.now();
+      if (ready) setReady(false);
+    });
+    // Watch inside the host for code changes
+    mo.observe(host, {childList:true, subtree:true, characterData:true});
+
+    // Poll for quiet window
+    const tick = () => {
+      if (!document.body.contains(host)) return; // block removed
+      if (!ready && Date.now() - lastChange >= QUIET_MS) setReady(true);
+      requestAnimationFrame(tick);
+    };
+    tick();
+
+    // Click handler
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
       const code = codeEl?.textContent ?? host.textContent ?? '';
       if (!code.trim()) { toast('No code detected in this block.'); return; }
+
+      if (!ready) {
+        toast('⌛ Code is still updating. The button will turn <b>green</b> when ready.');
+        return;
+      }
 
       const target = detectTargetFromHeader(code);
       if (!target) {
@@ -188,53 +239,54 @@
         return;
       }
 
-      const message = prompt(`Commit message for ${target.owner}/${target.repo}\nbranch ${target.branch}\n${target.path}:`, `Update ${target.path}`);
+      const msgDefault = `Update ${target.path}`;
+      const message = prompt(`Commit message for ${target.owner}/${target.repo}\nbranch ${target.branch}\n${target.path}:`, msgDefault);
       if (message === null) return;
 
       try {
-        toast('⏳ Committing…');
-        await commitToGitHub({...target, content: code, message: message || `Update ${target.path}`});
+        markReady(btn, false);
+        btn.textContent = 'Committing…';
+        await commitToGitHub({...target, content: code, message: message || msgDefault});
+        btn.textContent = 'Committed ✅';
         toast(`✅ <b>Committed</b> to <b>${target.owner}/${target.repo}</b><br>branch <b>${target.branch}</b><br>path <b>${target.path}</b>`);
+        setTimeout(()=> markReady(btn, true), 1200);
       } catch (err) {
         console.error(err);
         toast('❌ Commit failed. See console for details.');
+        markReady(btn, true);
       }
     });
-
-    // Ensure host can anchor absolute positioning
-    const style = getComputedStyle(host);
-    if (style.position === 'static') host.style.position = 'relative';
-
-    host.appendChild(btn);
   }
 
   function scan() {
-    const blocks = findBlocks();
-    blocks.forEach(({host, code}) => addButton(host, code));
+    findBlocks().forEach(({host, code}) => wireBlock(host, code));
   }
 
-  // Appear only once code is fully present (and re-appear after re-render)
+  // Initial + live
   scan();
-  const mo = new MutationObserver(() => scan());
-  mo.observe(document.body, {childList:true, subtree:true});
+  const pageMO = new MutationObserver(scan);
+  pageMO.observe(document.body, {childList:true, subtree:true});
 
-  // ---------- Hotkey fallback: Ctrl+Shift+G commits code under cursor ----------
+  // Hotkey: commit block under cursor
   document.addEventListener('keydown', (e) => {
     if (!(e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'g')) return;
-    const el = document.elementFromPoint?.(window.innerWidth/2, window.innerHeight/2) || document.body;
+    const el = document.elementFromPoint(window.innerWidth/2, window.innerHeight/2) || document.body;
     const host = el.closest?.('pre, figure, div[data-testid="code"]') || document.querySelector('pre, figure, div[data-testid="code"]');
     if (!host) { toast('No code block found for hotkey.'); return; }
     const codeEl = host.querySelector('code');
     if (!codeEl) { toast('No <code> element found inside this block.'); return; }
     const code = codeEl.textContent || '';
+    if (!code.trim()) { toast('No code detected in this block.'); return; }
     const target = detectTargetFromHeader(code);
     if (!target) { toast('❌ No target detected in this code block.'); return; }
-    const message = prompt(`Commit message for ${target.owner}/${target.repo}\nbranch ${target.branch}\n${target.path}:`, `Update ${target.path}`);
+
+    const msgDefault = `Update ${target.path}`;
+    const message = prompt(`Commit message for ${target.owner}/${target.repo}\nbranch ${target.branch}\n${target.path}:`, msgDefault);
     if (message === null) return;
     (async () => {
       try {
         toast('⏳ Committing…');
-        await commitToGitHub({...target, content: code, message: message || `Update ${target.path}`});
+        await commitToGitHub({...target, content: code, message: message || msgDefault});
         toast(`✅ <b>Committed</b> to <b>${target.owner}/${target.repo}</b><br>branch <b>${target.branch}</b><br>path <b>${target.path}</b>`);
       } catch (err) {
         console.error(err);
@@ -242,3 +294,4 @@
       }
     })();
   });
+})();
