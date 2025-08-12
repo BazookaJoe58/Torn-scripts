@@ -4,7 +4,7 @@
 // ==UserScript==
 // @name         Torn Market Suite (Starter)
 // @namespace    https://github.com/BazookaJoe58/Torn-scripts
-// @version      0.1.4
+// @version      0.1.5
 // @description  Starter scaffold; updates from GitHub raw
 // @author       BazookaJoe
 // @license      MIT
@@ -22,8 +22,6 @@
 // @supportURL   https://github.com/BazookaJoe58/Torn-scripts/issues
 // @downloadURL  https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/torn-market-suite.user.js
 // @updateURL    https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/torn-market-suite.user.js
-// @downloadURL  https://raw.githubusercontent.com/<your-username>/<your-repo>/main/torn-market-view-green-button.user.js
-// @updateURL    https://raw.githubusercontent.com/<your-username>/<your-repo>/main/torn-market-view-green-button.user.js
 // ==/UserScript==
 
 (function () {
