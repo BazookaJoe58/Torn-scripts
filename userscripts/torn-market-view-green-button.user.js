@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Torn Market: View Listing Green Button v0.4.0
+// @name         Torn Market: View Listing Green Button v0.4.2
 // @namespace    https://github.com/BazookaJoe58/Torn-scripts
-// @version      0.4.0
+// @version      0.4.2
 // @description  Adds a small green ✓ button next to each price input on View Listing. Clicking it shows the 5 cheapest current item-market listings for that item. Includes a menu to set/edit a Torn PUBLIC API key.
 // @author       BazookaJoe
 // @license      MIT
@@ -20,36 +20,33 @@
 
 (function () {
   'use strict';
+  console.log('[TMVGB] loaded v0.4.2');
 
-  // ---------- Config / storage helpers ----------
+  // ---------- Config / storage ----------
   const KEY_API = 'tmvgb_public_api_key';
-
   const getKey = () => GM_getValue(KEY_API, '');
   const setKey = (k) => GM_setValue(KEY_API, k || '');
 
   GM_registerMenuCommand('Set / Edit Torn PUBLIC API key', () => {
     const cur = getKey();
     const input = prompt('Enter your Torn PUBLIC API key (16 chars):', cur || '');
-    if (input === null) return; // cancelled
-    if (input && input.length === 16) {
-      setKey(input);
+    if (input === null) return;
+    if (input && input.trim().length === 16) {
+      setKey(input.trim());
       alert('Saved ✓');
     } else {
       alert('That does not look like a 16-character PUBLIC key.');
     }
   });
-
-  GM_registerMenuCommand('Clear API key', () => {
-    setKey('');
-    alert('API key cleared.');
-  });
+  GM_registerMenuCommand('Clear API key', () => { setKey(''); alert('API key cleared.'); });
 
   // ---------- Styles ----------
   GM_addStyle(`
     .tmvgb-btn.input-money-symbol{margin-left:6px}
-    .tmvgb-btn .tmvgb-k{width:20px;height:20px;border-radius:4px;border:none;cursor:pointer}
-    .tmvgb-k{background:#22c55e;color:#fff;font-weight:700;line-height:20px;display:inline-block;text-align:center}
-    .tmvgb-k:active{transform:scale(0.96)}
+    .tmvgb-k{display:inline-flex;align-items:center;justify-content:center;
+      width:20px;height:20px;border-radius:4px;border:none;cursor:pointer;
+      background:#22c55e;color:#fff;font-weight:700;line-height:20px}
+    .tmvgb-k:active{transform:scale(.96)}
     .tmvgb-popup{
       position:absolute; z-index: 99999; max-width: 320px;
       background: var(--tooltip-bg-color, #222); color: var(--info-msg-font-color, #ddd);
@@ -62,11 +59,10 @@
     .tmvgb-muted{opacity:.8}
   `);
 
-  // ---------- Small utilities ----------
-  const $ = (sel, root=document) => root.querySelector(sel);
+  // ---------- Utils ----------
   const $$ = (sel, root=document) => [...root.querySelectorAll(sel)];
-
   const number = (n) => new Intl.NumberFormat('en-US').format(n);
+  const onViewListing = () => location.hash.includes('#/viewListing');
 
   function findParent(el, predicate){
     let cur = el;
@@ -76,49 +72,51 @@
     }
     return null;
   }
-
   function itemIdFromImg(img){
-    // e.g. https://www.torn.com/images/items/884/large.png
     const m = img?.src?.match(/\/items\/(\d+)\//);
     return m ? parseInt(m[1], 10) : null;
   }
 
-  // Create one reusable popup
+  // ---------- Popup (one instance) ----------
   const popup = document.createElement('div');
   popup.className = 'tmvgb-popup';
   popup.style.display = 'none';
   document.body.appendChild(popup);
 
-  // Close popup on outside click / ESC
   document.addEventListener('click', (e) => {
     if (popup.style.display === 'none') return;
     if (!popup.contains(e.target) && !e.target.closest('.tmvgb-btn')){
       popup.style.display = 'none';
     }
   });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') popup.style.display = 'none';
-  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') popup.style.display = 'none'; });
 
   // ---------- API ----------
   function apiMarketListings(itemId, apiKey){
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       const url = `https://api.torn.com/v2/market?id=${itemId}&selections=itemMarket&key=${apiKey}`;
       GM_xmlhttpRequest({
         method: 'GET',
         url,
+        timeout: 15000,
         onload: (res) => {
           try{
             const data = JSON.parse(res.responseText);
             if (data?.error){
-              return resolve({ error: data.error });
+              const code = data.error.code;
+              const msg =
+                code === 2 ? 'Invalid API key.' :
+                code === 9 ? 'Torn API temporarily disabled — try again soon.' :
+                `API error ${code}: ${data.error.error}`;
+              return resolve({ error: msg });
             }
             resolve({ ok: true, item: data.itemmarket?.item, listings: data.itemmarket?.listings || [] });
-          }catch(err){
-            reject(err);
+          }catch{
+            resolve({ error: 'Bad response' });
           }
         },
-        onerror: (err) => reject(err)
+        onerror: () => resolve({ error: 'Request failed' }),
+        ontimeout: () => resolve({ error: 'Timed out' }),
       });
     });
   }
@@ -135,9 +133,10 @@
 
   // ---------- Button injection ----------
   function injectButton(priceWrapper){
-    if (priceWrapper.querySelector('.tmvgb-btn')) return;
+    const group = priceWrapper.querySelector('.input-money-group');
+    if (!group || group.querySelector('.tmvgb-btn')) return;
 
-    const wrapperRow = findParent(priceWrapper, el => String(el.className).includes('itemRowWrapper___'));
+    const wrapperRow = findParent(priceWrapper, el => String(el.className).includes('itemRowWrapper'));
     if (!wrapperRow) return;
 
     const img = wrapperRow.querySelector('[class*=viewInfoButton] img');
@@ -148,13 +147,14 @@
     btnWrap.className = 'tmvgb-btn input-money-symbol';
     btnWrap.title = 'Show cheapest 5 market listings';
 
-    const k = document.createElement('span');
+    const k = document.createElement('button');
+    k.type = 'button';
     k.className = 'tmvgb-k';
     k.textContent = '✓';
     btnWrap.appendChild(k);
 
-    // place on the RIGHT of the price input
-    priceWrapper.querySelector('.input-money-group')?.appendChild(btnWrap);
+    // Right side of the price input
+    group.appendChild(btnWrap);
 
     btnWrap.addEventListener('click', async (e) => {
       e.stopPropagation();
@@ -163,61 +163,62 @@
       if (!apiKey || apiKey.length !== 16){
         const got = prompt('Enter your Torn PUBLIC API key (16 chars):', apiKey || '');
         if (!got) return;
-        if (got.length !== 16) { alert('That key does not look valid.'); return; }
-        setKey(got);
-        apiKey = got;
+        if (got.trim().length !== 16) { alert('That key does not look valid.'); return; }
+        setKey(got.trim());
+        apiKey = got.trim();
       }
 
-      // show loading near the button
       const rect = btnWrap.getBoundingClientRect();
       popup.style.left = (window.scrollX + rect.left - 10) + 'px';
       popup.style.top  = (window.scrollY + rect.bottom + 6) + 'px';
       popup.innerHTML = `<div class="tmvgb-muted">Loading listings…</div>`;
       popup.style.display = 'block';
 
-      try{
-        const res = await apiMarketListings(itemId, apiKey);
-        if (res?.error){
-          const msg = res.error?.error || `API error (code ${res.error?.code || '?'})`;
-          popup.innerHTML = `<div class="tmvgb-muted">${msg}</div>`;
-          return;
-        }
-        const html = renderListingsHtml(res.item?.name, res.listings || []);
-        popup.innerHTML = html;
-      }catch(err){
-        popup.innerHTML = `<div class="tmvgb-muted">Failed to load listings.</div>`;
-        console.error('[tmvgb] fetch failed', err);
+      const res = await apiMarketListings(itemId, apiKey);
+      if (res?.error){
+        popup.innerHTML = `<div class="tmvgb-muted">${res.error}</div>`;
+        return;
       }
+      const html = renderListingsHtml(res.item?.name, res.listings || []);
+      popup.innerHTML = html;
     });
   }
 
-  // ---------- Observe View Listing and add buttons ----------
-  function onMutations(muts){
-    for (const m of muts){
-      const t = m.target;
-      // Only on the ViewListing tab
-      if (!location.hash.includes('#/viewListing')) continue;
-
-      // when the main wrapper appears or rows update
-      if (String(t.className || '').includes('viewListingWrapper___') ||
-          String(t.className || '').includes('priceInputWrapper___')){
-        $$('.viewListingWrapper___ [class*=itemRowWrapper___] [class*=itemRow___]:not([class*=grayedOut___]) [class^=priceInputWrapper___]')
-          .forEach(injectButton);
-      }
-    }
+  function scanAll(){
+    if (!onViewListing()) return;
+    // Looser class matching so minor hash changes don't break us
+    $$('[class*="viewListingWrapper"] [class*="itemRowWrapper"] [class*="itemRow"]:not([class*="grayedOut"]) [class*="priceInputWrapper"]')
+      .forEach(injectButton);
   }
 
-  const root = document.querySelector('#item-market-root');
-  if (!root) return;
+  function startObserver(root){
+    // Seed + periodic rescans (handles React re-renders that nuke our nodes)
+    scanAll();
+    let intervalId = setInterval(() => { if (onViewListing()) scanAll(); }, 1500);
 
-  // seed once (in case the content is already there)
-  setTimeout(() => {
-    if (location.hash.includes('#/viewListing')){
-      $$('.viewListingWrapper___ [class*=itemRowWrapper___] [class*=itemRow___]:not([class*=grayedOut___]) [class^=priceInputWrapper___]')
-        .forEach(injectButton);
-    }
-  }, 500);
+    const mo = new MutationObserver(() => { if (onViewListing()) scanAll(); });
+    mo.observe(root, { childList: true, subtree: true });
 
-  const mo = new MutationObserver(onMutations);
-  mo.observe(root, { childList: true, subtree: true });
+    window.addEventListener('hashchange', () => {
+      setTimeout(() => {
+        if (!onViewListing()) return;
+        scanAll();
+      }, 100);
+    });
+  }
+
+  function waitForRoot(){
+    const existing = document.querySelector('#item-market-root');
+    if (existing) { startObserver(existing); return; }
+    const mo = new MutationObserver(() => {
+      const r = document.querySelector('#item-market-root');
+      if (r){
+        mo.disconnect();
+        startObserver(r);
+      }
+    });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+  }
+
+  waitForRoot();
 })();
