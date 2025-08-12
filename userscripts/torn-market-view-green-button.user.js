@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Torn Market: View Listing Green Button v0.4.2
+// @name         Torn Market: View Listing Green Button v0.4.3
 // @namespace    https://github.com/BazookaJoe58/Torn-scripts
-// @version      0.4.2
+// @version      0.4.3
 // @description  Adds a small green ✓ button next to each price input on View Listing. Clicking it shows the 5 cheapest current item-market listings for that item. Includes a menu to set/edit a Torn PUBLIC API key.
 // @author       BazookaJoe
 // @license      MIT
@@ -20,7 +20,7 @@
 
 (function () {
   'use strict';
-  console.log('[TMVGB] loaded v0.4.2');
+  console.log('[TMVGB] loaded v0.4.3');
 
   // ---------- Config / storage ----------
   const KEY_API = 'tmvgb_public_api_key';
@@ -42,7 +42,7 @@
 
   // ---------- Styles ----------
   GM_addStyle(`
-    .tmvgb-btn.input-money-symbol{margin-left:6px}
+    .tmvgb-btn{display:inline-flex;align-items:center;vertical-align:middle}
     .tmvgb-k{display:inline-flex;align-items:center;justify-content:center;
       width:20px;height:20px;border-radius:4px;border:none;cursor:pointer;
       background:#22c55e;color:#fff;font-weight:700;line-height:20px}
@@ -132,9 +132,13 @@
   }
 
   // ---------- Button injection ----------
+  const BTN_SIZE = 20;  // keep in sync with CSS
+  const BTN_GAP  = 4;
+  const OFFSET_PX = 4 * (BTN_SIZE + BTN_GAP); // ~ four button widths
+
   function injectButton(priceWrapper){
-    const group = priceWrapper.querySelector('.input-money-group');
-    if (!group || group.querySelector('.tmvgb-btn')) return;
+    // make sure we only add once per row
+    if (priceWrapper.querySelector(':scope > .tmvgb-btn')) return;
 
     const wrapperRow = findParent(priceWrapper, el => String(el.className).includes('itemRowWrapper'));
     if (!wrapperRow) return;
@@ -144,8 +148,10 @@
     if (!itemId) return;
 
     const btnWrap = document.createElement('span');
-    btnWrap.className = 'tmvgb-btn input-money-symbol';
+    btnWrap.className = 'tmvgb-btn';
     btnWrap.title = 'Show cheapest 5 market listings';
+    btnWrap.style.marginLeft = OFFSET_PX + 'px';      // << push it right
+    btnWrap.style.position = 'relative';              // follow normal flow, no overlap
 
     const k = document.createElement('button');
     k.type = 'button';
@@ -153,8 +159,8 @@
     k.textContent = '✓';
     btnWrap.appendChild(k);
 
-    // Right side of the price input
-    group.appendChild(btnWrap);
+    // Append as a SIBLING of the input group (not inside it), so it won't overlay the input
+    priceWrapper.appendChild(btnWrap);
 
     btnWrap.addEventListener('click', async (e) => {
       e.stopPropagation();
@@ -179,8 +185,7 @@
         popup.innerHTML = `<div class="tmvgb-muted">${res.error}</div>`;
         return;
       }
-      const html = renderListingsHtml(res.item?.name, res.listings || []);
-      popup.innerHTML = html;
+      popup.innerHTML = renderListingsHtml(res.item?.name, res.listings || []);
     });
   }
 
@@ -192,19 +197,11 @@
   }
 
   function startObserver(root){
-    // Seed + periodic rescans (handles React re-renders that nuke our nodes)
     scanAll();
-    let intervalId = setInterval(() => { if (onViewListing()) scanAll(); }, 1500);
-
+    setInterval(() => { if (onViewListing()) scanAll(); }, 1500);
     const mo = new MutationObserver(() => { if (onViewListing()) scanAll(); });
     mo.observe(root, { childList: true, subtree: true });
-
-    window.addEventListener('hashchange', () => {
-      setTimeout(() => {
-        if (!onViewListing()) return;
-        scanAll();
-      }, 100);
-    });
+    window.addEventListener('hashchange', () => setTimeout(() => { if (onViewListing()) scanAll(); }, 100));
   }
 
   function waitForRoot(){
@@ -212,10 +209,7 @@
     if (existing) { startObserver(existing); return; }
     const mo = new MutationObserver(() => {
       const r = document.querySelector('#item-market-root');
-      if (r){
-        mo.disconnect();
-        startObserver(r);
-      }
+      if (r){ mo.disconnect(); startObserver(r); }
     });
     mo.observe(document.documentElement, { childList: true, subtree: true });
   }
