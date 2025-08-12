@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Torn Market: View Listing Green Button v0.2.0
+// @name         Torn Market: View Listing Green Button v0.4.0
 // @namespace    https://github.com/BazookaJoe58/Torn-scripts
-// @version      0.2.0
+// @version      0.4.0
 // @description  Adds a small green ✓ button next to each price input on View Listing. Clicking it shows the 5 cheapest current item-market listings for that item. Includes a menu to set/edit a Torn PUBLIC API key.
 // @author       BazookaJoe
 // @license      MIT
