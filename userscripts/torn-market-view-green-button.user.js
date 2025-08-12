@@ -1,15 +1,18 @@
 // ==UserScript==
-// @name         Torn Market: View Listing Green Button (test)
-// @namespace    https://github.com/<your-username>/<your-repo>
-// @version      0.1.2
+// @name         Torn Market: View Listing Green Button
+// @namespace    https://github.com/BazookaJoe58/Torn-scripts
+// @version      0.1.3
 // @description  Adds a small green ✓ button next to each price input on View Listing (does nothing yet).
-// @author       You
+// @author       BazookaJoe
+// @license      MIT
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://*.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
 // @grant        GM_addStyle
-// @downloadURL  https://raw.githubusercontent.com/<your-username>/<your-repo>/main/torn-market-view-green-button.user.js
-// @updateURL    https://raw.githubusercontent.com/<your-username>/<your-repo>/main/torn-market-view-green-button.user.js
+// @homepageURL  https://github.com/BazookaJoe58/Torn-scripts
+// @supportURL   https://github.com/BazookaJoe58/Torn-scripts/issues
+// @downloadURL  https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/main/userscripts/torn-market-view-green-button.user.js
+// @updateURL    https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/main/userscripts/torn-market-view-green-button.user.js
 // ==/UserScript==
 
 (function () {
