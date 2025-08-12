@@ -17,8 +17,8 @@
 //
 // @homepageURL  https://github.com/BazookaJoe58/Torn-scripts
 // @supportURL   https://github.com/BazookaJoe58/Torn-scripts/issues
-// @downloadURL  https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/main/userscripts/torn-market-view-green-button.user.js
-// @updateURL    https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/main/userscripts/torn-market-view-green-button.user.js
+// @downloadURL https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/torn-market-view-green-button.user.js
+// @updateURL   https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/torn-market-view-green-button.user.js
 //
 // The next 4 lines are read by your “Commit to GitHub” bridge userscript:
 // @gitOwner     BazookaJoe58
