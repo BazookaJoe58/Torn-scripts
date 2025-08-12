@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Stock Toggle (Per-Stock Persistent)
+// @name         Torn Stock Toggle (Per-Stock, Robust)
 // @namespace    http://tampermonkey.net/
-// @version      2.0.0
-// @description  Adds a per-stock toggle on the Torn Stocks page with persistent state that doesn't shift when the list reorders
+// @version      2.0.1
+// @description  Per-stock lock toggle that persists and survives reorders/re-renders on Torn's Stocks page
 // @author       BazookaJoe
 // @license      MIT
 // @match        https://www.torn.com/*
@@ -15,30 +15,193 @@
 (() => {
   'use strict';
 
-  // -------- Config (selectors are made resilient on purpose) --------
-  const CONFIG = {
-    storageKey: 'tst.v2.state', // localStorage map: { [stockKey]: { disabled: boolean } }
-    pageMatch: /[?&]sid=stocks\b/i,
-    selectors: {
-      header: '.title-black, ul[class*="title"], ul[class*="header"]',
-      listContainer: 'ul[class*="stockMarket"], div[class*="stockMarket"]',
-      row: 'li[class*="stock___"], li[class*="stockItem"], div[class*="stock___"], div[class*="stockItem"]',
-      nameLink: 'a[href*="stockID="], a[href*="stocks#/p=overview"]',
-      dividendCell: 'li[class*="Dividend"], li[class*="stockDividend"], div[class*="Dividend"], div[class*="stockDividend"]',
-      profitCell: 'li[class*="profit"], li[class*="Profit"], div[class*="profit"], div[class*="Profit"]'
+  const STORAGE_KEY = 'tst.v2.state'; // { "id:123": {disabled:true}, ... }
+  const ROW_MARK = 'data-tst-row';
+  const TOGGLE_CLASS = 'tst-toggle';
+  const DIM_CLASS = 'tst-dim';
+
+  // ---------------- Storage ----------------
+  const store = {
+    all() {
+      try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
+      catch { return {}; }
     },
-    classes: {
-      rowDim: 'tst--row-dimmed',
-      toggle: 'tst--toggle'
+    get(key) { return this.all()[key] || null; },
+    set(key, partial) {
+      const m = this.all();
+      m[key] = { ...(m[key] || {}), ...(partial || {}) };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(m));
     }
   };
 
-  // -------- Storage helpers --------
-  const store = {
-    load() {
-      try {
-        const raw = localStorage.getItem(CONFIG.storageKey);
-        return raw ? JSON.parse(raw) : {};
-      } catch {
-        return {};
+  // ---------------- Styles ----------------
+  function addStyles() {
+    if (document.getElementById('tst-styles')) return;
+    const s = document.createElement('style');
+    s.id = 'tst-styles';
+    s.textContent = `
+      .${DIM_CLASS} {
+        opacity: .55 !important;
+        filter: grayscale(.2);
+        pointer-events: none !important;
       }
+      .${DIM_CLASS} .${TOGGLE_CLASS} { pointer-events: auto !important; }
+
+      .${TOGGLE_CLASS} {
+        position: absolute;
+        top: 6px;
+        right: 8px;
+        width: 42px;
+        height: 22px;
+        border-radius: 9999px;
+        appearance: none;
+        background: rgba(255,255,255,.14);
+        border: 2px solid rgba(255,255,255,.25);
+        cursor: pointer;
+        transition: background .2s ease, border-color .2s ease, transform .05s ease;
+        z-index: 2;
+      }
+      .${TOGGLE_CLASS}::before {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        background: #fff;
+        transition: left .2s ease;
+      }
+      .${TOGGLE_CLASS}:checked {
+        background: #28a745;
+        border-color: rgba(40,167,69,.8);
+      }
+      .${TOGGLE_CLASS}:checked::before { left: 22px; }
+      .${TOGGLE_CLASS}:active { transform: scale(.98); }
+      /* ensure row is positionable for absolute toggle */
+      [${ROW_MARK}] { position: relative; }
+    `;
+    document.head.appendChild(s);
+  }
+
+  // ---------------- Helpers ----------------
+  const $all = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+  const closestRow = (el) => el.closest(`li,div,section,article`);
+
+  function stockKeyFromLink(a) {
+    const href = a.getAttribute('href') || '';
+    const m = href.match(/stockID=(\d+)/i);
+    return m ? `id:${m[1]}` : null;
+  }
+
+  function ensureRowMarked(row) {
+    if (!row) return;
+    if (!row.hasAttribute(ROW_MARK)) row.setAttribute(ROW_MARK, '1');
+    // Some Torn blocks swallow clicks; keep our toggle clickable
+    row.style.pointerEvents = row.style.pointerEvents || '';
+  }
+
+  function applyState(row, disabled) {
+    row.classList.toggle(DIM_CLASS, !!disabled);
+  }
+
+  function makeToggle(initial, onChange) {
+    const t = document.createElement('input');
+    t.type = 'checkbox';
+    t.className = TOGGLE_CLASS;
+    t.checked = !!initial;
+    t.title = 'Lock/unlock this stock row';
+    t.addEventListener('change', () => onChange(t.checked));
+    return t;
+  }
+
+  // Inject a toggle for a given stock link (id anchored)
+  function injectForLink(a) {
+    const key = stockKeyFromLink(a);
+    if (!key) return;
+
+    const row = closestRow(a);
+    if (!row) return;
+
+    ensureRowMarked(row);
+
+    // Avoid double-injection
+    if (row.querySelector(`input.${TOGGLE_CLASS}[data-key="${key}"]`)) {
+      // Still sync state (rows get recycled)
+      const state = store.get(key);
+      applyState(row, state && state.disabled);
+      return;
+    }
+
+    const state = store.get(key);
+    const toggle = makeToggle(state && state.disabled, (checked) => {
+      store.set(key, { disabled: checked });
+      applyState(row, checked);
+    });
+    toggle.dataset.key = key;
+
+    // Place in top-right
+    row.appendChild(toggle);
+    applyState(row, state && state.disabled);
+  }
+
+  // Scan the page for any stock links and inject toggles
+  function scan() {
+    const links = $all('a[href*="stockID="]');
+    links.forEach(injectForLink);
+  }
+
+  // MutationObserver to keep things working across re-renders
+  function observe() {
+    const mo = new MutationObserver((mutations) => {
+      let changed = false;
+      for (const m of mutations) {
+        if (m.type === 'childList') {
+          m.addedNodes.forEach((n) => {
+            if (!(n instanceof HTMLElement)) return;
+            if (n.matches && n.matches('a[href*="stockID="]')) {
+              injectForLink(n); changed = true;
+            } else {
+              // look inside
+              const inner = n.querySelectorAll && n.querySelectorAll('a[href*="stockID="]');
+              if (inner && inner.length) {
+                inner.forEach(injectForLink); changed = true;
+              }
+            }
+          });
+        } else if (m.type === 'attributes' && m.target instanceof HTMLElement) {
+          if (m.target.matches('a[href*="stockID="]')) { injectForLink(m.target); changed = true; }
+        }
+      }
+      if (!changed) {
+        // Torn sometimes replaces text only; rescan lightly
+        scan();
+      }
+    });
+    mo.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'class'] });
+  }
+
+  // Handle SPA URL changes (pushState/hashchange/popstate)
+  function hookSpaNavigation() {
+    const kick = () => setTimeout(scan, 30);
+    const _ps = history.pushState;
+    history.pushState = function () { _ps.apply(this, arguments); kick(); };
+    window.addEventListener('popstate', kick);
+    window.addEventListener('hashchange', kick);
+  }
+
+  // -------- init --------
+  function init() {
+    addStyles();
+    scan();
+    observe();
+    hookSpaNavigation();
+  }
+
+  // Start once DOM is ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    init();
+  }
+})();
