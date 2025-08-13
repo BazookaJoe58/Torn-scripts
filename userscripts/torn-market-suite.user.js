@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Market Suite (MV/PD + Corner % + List stack $ then %) - Toggleable Panel
 // @namespace    http://tampermonkey.net/
-// @version      5.2.1
-// @description  Three-tab UI (Main/MV/PD). Full-tile/row overlay (T5/T6 semi‑transparent). Grid: corner $ + corner % + orange after‑tax profit (>0 only); List: tax lines then $ delta then % delta under price. PD overlay only on the single cheapest listing vs the next higher price. Panel opens/closes via MS toggle, has a close (×) button, supports Esc. Fonts +1px. MS tab always visible. Author: BazookaJoe.
+// @version      5.1.2
+// @description  Three-tab UI (Main/MV/PD). Full-tile/row overlay (T5/T6 semi‑transparent). Grid: corner $ + corner % + orange after‑tax profit (>0 only); List: tax lines then $ delta then % delta under price. PD overlay only on the single cheapest listing vs the next higher price. Panel opens/closes via MS toggle, has a close (×) button, and supports Esc. Fonts +1px. MS tab always visible. Author: BazookaJoe.
 // @author       BazookaJoe
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/imarket.php*
@@ -12,15 +12,6 @@
 // @grant        GM_setValue
 // @grant        GM_addStyle
 // @grant        GM.xmlHttpRequest
-//
-// ===== Auto-update (GitHub via jsDelivr) =====
-// Repo: https://github.com/BazookaJoe/torn-market-suite
-// File: torn-market-suite.user.js
-//
-// @downloadURL  https://cdn.jsdelivr.net/gh/BazookaJoe/torn-market-suite@latest/torn-market-suite.user.js
-// @updateURL    https://cdn.jsdelivr.net/gh/BazookaJoe/torn-market-suite@latest/torn-market-suite.user.js
-// @homepageURL  https://github.com/BazookaJoe/torn-market-suite
-// @supportURL   https://github.com/BazookaJoe/torn-market-suite/issues
 // ==/UserScript==
 
 (function () {
@@ -155,15 +146,18 @@
     if (document.getElementById('tms-floating')) return;
 
     GM_addStyle(`
+      /* Targets positioned for overlays */
       div[class*="itemTile"], ul[class*="items-list"]>li, .seller-info, #fullListingsView tr, #topCheapestView tr { position: relative !important; }
 
-      #tms-toggle { position: fixed; top: 120px; right: 0; width: 36px; height: 50px; background:#333; color:#fff; border:1px solid #555; border-right:none; border-top-left-radius:8px; border-bottom-left-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; font-weight:700; z-index:100000; }
-      #tms-toggle.hidden { display:flex !important; }
+      #tms-toggle { position: fixed; top: 120px; right: 0; width: 36px; height: 50px; background:#333; color:#fff; border:1px solid #555; border-right:none; border-top-left-radius:8px; border-bottom-left-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; font-weight:700; z-index:100000; } /* always visible + high z */
+      #tms-toggle.hidden { display:flex !important; } /* guard: never hidden */
 
+      /* Hidden by default; slides in when .open is present */
       #tms-floating { position: fixed; top: 120px; right: -360px; width: 340px; z-index: 2000; background:#333; color:#eee; border:1px solid #555; border-right:none; border-top-left-radius:10px; border-bottom-left-radius:10px; box-shadow:-2px 2px 10px rgba(0,0,0,.5); padding: 12px; transition:right .25s; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
       #tms-floating.open { right: 0 !important; }
       #tms-floating h3 { margin:0 0 8px; text-align:center; border-bottom:1px solid #555; padding-bottom:8px; font-size:1.05em; position:relative; }
 
+      /* Close (×) button */
       #tms-close { position:absolute; right:6px; top:50%; transform:translateY(-50%); background:#444; color:#fff; border:none; border-radius:6px; width:26px; height:26px; font-weight:700; cursor:pointer; line-height:1; }
       #tms-close:hover { background:#555; }
 
@@ -181,11 +175,11 @@
       .tms-slider:before { content:""; position:absolute; width:20px; height:20px; left:3px; bottom:3px; background:#fff; border-radius:50%; transition:.2s; }
       input:checked + .tms-slider { background:#2e9e4f; }
       input:checked + .tms-slider:before { transform:translateX(24px); }
-      .tms-input { width:100%; padding:10px 12px; border-radius:6px; border:1px solid #555; background:#1f1f1f; color:#eee; font-size:15px; }
+      .tms-input { width:100%; padding:10px 12px; border-radius:6px; border:1px solid #555; background:#1f1f1f; color:#eee; font-size:15px; } /* +1px */
 
       .tms-grid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
       .tms-grid-row { display:grid; grid-template-columns: auto 1fr; gap:8px; align-items:center; }
-      .tms-grid-row input { padding:9px 10px; font-size:15px; }
+      .tms-grid-row input { padding:9px 10px; font-size:15px; } /* +1px */
 
       .tms-btn { width:100%; margin-top:6px; padding:10px 12px; border:none; border-radius:6px; background:#007bff; color:#fff; font-weight:600; cursor:pointer; }
       .tms-btn.green { background:#2e9e4f; }
@@ -194,26 +188,30 @@
       [data-tms-scope] { position: relative !important; }
       .tms-cover { position: absolute; inset: 0; border-radius: 8px; pointer-events: none; z-index: 1; }
 
+      /* Corner tags (grid & list) */
       .tms-profit-tag { position:absolute; top:4px; right:4px; background:rgba(40,167,69,.9); color:#fff; padding:2px 6px; border-radius:4px; font-size:12px; font-weight:700; z-index:2; pointer-events:none; }
       .tms-profit-tag.neg { background:rgba(220,53,69,.9); }
       .tms-corner-pct { position:absolute; top:24px; right:4px; padding:1px 6px; border-radius:4px; font-size:12px; font-weight:700; z-index:2; pointer-events:none; color:#fff; }
-      .tms-corner-pct.neg { background:rgba(0,103,0,.9); }
-      .tms-corner-pct.pos { background:rgba(153,0,0,.9); }
+      .tms-corner-pct.neg { background:rgba(0,103,0,.9); }  /* profit (below MV) */
+      .tms-corner-pct.pos { background:rgba(153,0,0,.9); }  /* loss (above MV)  */
 
+      /* Grid-only after-tax profit corner tag (orange; only when > 0) */
       .tms-corner-tax { position:absolute; top:44px; right:4px; padding:1px 6px; border-radius:4px; font-size:12px; font-weight:700; z-index:2; pointer-events:none; color:#fff; background:rgba(255,152,0,.9); }
 
+      /* List view under-price stack: tax, then $ delta, then % delta */
       .tms-underprice { display:flex; flex-direction:column; align-items:flex-start; gap:2px; margin-top:2px; width:100%; z-index:2; position:relative; }
       .tms-badge { display:inline-flex; align-items:center; gap:4px; font-weight:700; font-size:7px; padding:2px 2px; border-radius:4px; white-space:nowrap; color:#fff; }
-      .tms-badge.dol.neg { background:rgba(0,103,0,.9); }
-      .tms-badge.dol.pos { background:rgba(153,0,0,.9); }
+      .tms-badge.dol.neg { background:rgba(0,103,0,.9); }    /* profit (below MV)  */
+      .tms-badge.dol.pos { background:rgba(153,0,0,.9); }    /* loss (above MV)    */
       .tms-badge.pct.neg { background:rgba(0,103,0,.9); }
       .tms-badge.pct.pos { background:rgba(153,0,0,.9); }
 
       .tms-mini { display:inline-flex; flex-direction:column; line-height:1.1; }
-      .tms-mini span { font-size:8px; font-weight:700; white-space:nowrap; }
+      .tms-mini span { font-size:8px; font-weight:700; white-space:nowrap; } /* +1px */
       .tms-mini .tax { color:#4CAF50; }
       .tms-mini .baz { color:#FF9800; }
 
+      /* Overlays — T5/T6 semi-transparent */
       .tms-cover.tmh-profit-1{background-color:rgba(76,175,80,0.22)!important}
       .tms-cover.tmh-profit-2{background-color:rgba(76,175,80,0.40)!important}
       .tms-cover.tmh-profit-3{background-color:rgba(76,175,80,0.58)!important}
@@ -294,16 +292,21 @@
     toggle.id = 'tms-toggle'; toggle.textContent = 'MS';
     document.body.appendChild(toggle);
 
+    // Open/close with MS button (direct binding)
     toggle.addEventListener('click', () => panel.classList.toggle('open'));
+    // Robust fallback binding
     document.addEventListener('click', (e) => {
       if (e.target && e.target.id === 'tms-toggle') {
         const p = document.getElementById('tms-floating');
         if (p) p.classList.toggle('open');
       }
     });
+    // Close button inside header
     panel.querySelector('#tms-close')?.addEventListener('click', () => panel.classList.remove('open'));
+    // Esc to close
     window.addEventListener('keydown', (e) => { if (e.key === 'Escape') panel.classList.remove('open'); });
 
+    // Tabs
     const tabs = panel.querySelectorAll('.tms-tab');
     const pages = {
       main: panel.querySelector('#tms-tab-main'),
@@ -317,6 +320,7 @@
       pages[t.dataset.tab].classList.remove('tms-hidden');
     }));
 
+    // Threshold grids
     const renderGrid = (root, thr, isPercent=false) => {
       root.innerHTML = '';
       for (let i = 6; i >= 1; i--) {
@@ -334,6 +338,7 @@
     };
 
     const $ = s => panel.querySelector(s);
+    // Main tab vals
     $('#tms-master').checked = S.master;
     $('#tms-pct').checked   = S.showPct;
     $('#tms-tax').checked   = S.showTax;
@@ -341,18 +346,21 @@
     $('#tms-max').value     = String(S.maxPerPass);
     $('#tms-key').value     = S.apiKey || '';
 
+    // MV tab
     $('#tms-mv-enabled').checked = S.mvEnabled;
     $('#tms-mv-dollar').checked  = S.mvDollarMode;
     $('#tms-mv-percent').checked = S.mvPercentMode;
     renderGrid($('#tms-mv-dollar-grid'),  S.mvDollarThresholds,  false);
     renderGrid($('#tms-mv-percent-grid'), S.mvPercentThresholds, true);
 
+    // PD tab
     $('#tms-pd-enabled').checked = S.pdEnabled;
     $('#tms-pd-dollar').checked  = S.pdDollarMode;
     $('#tms-pd-percent').checked = S.pdPercentMode;
     renderGrid($('#tms-pd-dollar-grid'),  S.pdDollarThresholds,  false);
     renderGrid($('#tms-pd-percent-grid'), S.pdPercentThresholds, true);
 
+    // Listeners
     $('#tms-master').addEventListener('change', e => { S.master = e.target.checked; save(K.MASTER, S.master); handleChange(); });
     $('#tms-pct').addEventListener('change', e => { S.showPct = e.target.checked; save(K.SHOW_PCT, S.showPct); handleChange(); });
     $('#tms-tax').addEventListener('change', e => { S.showTax = e.target.checked; save(K.SHOW_TAX, S.showTax); handleChange(); });
@@ -394,6 +402,7 @@
     });
   }
 
+  // ---- helpers for visuals ----
   const tierClass = (thr, value, prefix) => {
     if (value >= thr.tier6) return `${prefix}-6`;
     if (value >= thr.tier5) return `${prefix}-5`;
@@ -430,7 +439,7 @@
     if (!S.showPct) return;
     scope.querySelector(':scope > .tms-corner-pct')?.remove();
     const t = document.createElement('div');
-    t.className = 'tms-corner-pct ' + (pct > 0 ? 'neg' : 'pos');
+    t.className = 'tms-corner-pct ' + (pct > 0 ? 'neg' : 'pos'); // neg=profit(green), pos=loss(red)
     t.textContent = `${pct > 0 ? '-' : '+'}${Math.abs(pct)}%`;
     scope.appendChild(t);
   }
@@ -524,10 +533,12 @@
       if (S.master) {
         const cover = ensureScope(tile);
 
+        // Grid: keep corner $ + %; no under-price stack
         priceEl?.querySelector('.tms-underprice')?.remove();
 
         const cls = applyMVHighlight(tile, price);
 
+        // Orange after-tax profit (MV*0.95 - price) — show only if > 0
         const netProfit = Math.round(mv * 0.95 - price);
         tile.querySelector(':scope > .tms-corner-tax')?.remove();
         if (netProfit > 0) addCornerTaxProfit(tile, netProfit);
@@ -546,6 +557,7 @@
 
     const rowPrices = rows.map(r => parsePrice(r.querySelector('[class*="price"]')?.textContent));
 
+    // Only one PD overlay: cheapest vs next higher price
     const valid = rowPrices.filter(p => p != null);
     const cheapestPrice = valid.length ? Math.min(...valid) : null;
     const nextHigherPrice = valid.filter(p => p > cheapestPrice).sort((a, b) => a - b)[0] ?? null;
@@ -568,11 +580,14 @@
       if (S.master) {
         const cover = ensureScope(row);
 
+        // Under-price stack (list-only): tax -> $ delta -> % delta
         priceEl?.querySelector('.tms-underprice')?.remove();
         priceEl.appendChild(buildUnderPrice(price, mv));
 
+        // Highlights
         let cls = applyMVHighlight(row, price);
 
+        // Only cheapest row can receive PD highlight (vs next higher)
         if (idx === cheapestIndex) {
           const pd = applyPDDiscountHighlight(price, nextHigherPrice);
           if (!cls && pd) cls = pd;
@@ -622,6 +637,7 @@
       processed.clear();
       document.querySelectorAll('.tms-underprice, .tms-profit-tag, .tms-corner-pct, .tms-corner-tax, .tms-cover').forEach(n=>n.remove());
 
+      // MS tab: always visible now (no auto-hide)
       const toggle = document.getElementById('tms-toggle');
       if (toggle) toggle.classList.remove('hidden');
 
@@ -640,6 +656,7 @@
   new MutationObserver(handleChange).observe(document.body, { childList:true, subtree:true });
   window.addEventListener('hashchange', handleChange);
 
+  // Safety rebind for MS toggle if DOM re-renders (times out after 15s)
   (function ensureToggleHook(){
     const rebind = () => {
       const toggle = document.getElementById('tms-toggle');
@@ -657,4 +674,3 @@
 
   handleChange();
 })();
-
