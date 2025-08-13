@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Market Suite (MV/PD + Corner % + $→% + Orange Net) — PDA Port (Compact + Autofit)
-// @namespace    http://tampermonkey.net/
-// @version      5.2.2-pda
+// @namespace
+// @version      5.2.3
 // @description  PDA-ready port matching your TM suite (same storage keys): tabs (Main/MV/PD), 6 tiers for MV & PD (dollar+percent), corner $ + corner %, orange after-tax net in grid, list shows tax then $ + %, PD overlay only on the cheapest vs next, T5/T6 semi-transparent, debounced/visible-only passes. Compact (~50%) and auto-fit to phone viewport. Author: BazookaJoe.
 // @author       BazookaJoe
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
@@ -14,8 +14,8 @@
 // @grant        GM.xmlHttpRequest
 //
 // Auto-update placeholders (swap to your repo if desired):
-// @downloadURL  https://cdn.jsdelivr.net/gh/YOUR_GITHUB_USER/YOUR_REPO@latest/PATH/TO/FILE.user.js
-// @updateURL    https://cdn.jsdelivr.net/gh/YOUR_GITHUB_USER/YOUR_REPO@latest/PATH/TO/FILE.user.js
+// @downloadURL  https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/PDA-torm-market-suite.user.js
+// @updateURL    https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/PDA-torm-market-suite.user.js
 // ==/UserScript==
 
 (function () {
