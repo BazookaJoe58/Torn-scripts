@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Market Suite (MV/PD + Corner % + $→% + Orange Net) — PDA Port (Compact + Autofit)
 // @namespace
-// @version      5.2.3
+// @version      5.2.4
 // @description  PDA-ready port matching your TM suite (same storage keys): tabs (Main/MV/PD), 6 tiers for MV & PD (dollar+percent), corner $ + corner %, orange after-tax net in grid, list shows tax then $ + %, PD overlay only on the cheapest vs next, T5/T6 semi-transparent, debounced/visible-only passes. Compact (~50%) and auto-fit to phone viewport. Author: BazookaJoe.
 // @author       BazookaJoe
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
