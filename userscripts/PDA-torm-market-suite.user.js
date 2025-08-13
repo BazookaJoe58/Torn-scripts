@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Market Suite (MV/PD + Corner % + $→% + Orange Net) — PDA Port (Compact + Autofit)
+// @name         Torn Market Suite (MV/PD + Corner % + $→% + Orange Net) — PDA Port (Desktop-Style UI)
 // @namespace
 // @version      5.2.4
-// @description  PDA-ready port matching your TM suite (same storage keys): tabs (Main/MV/PD), 6 tiers for MV & PD (dollar+percent), corner $ + corner %, orange after-tax net in grid, list shows tax then $ + %, PD overlay only on the cheapest vs next, T5/T6 semi-transparent, debounced/visible-only passes. Compact (~50%) and auto-fit to phone viewport. Author: BazookaJoe.
+// @description  PDA-ready port matching your TM suite (same storage keys) with desktop-style controls. Tabs (Main/MV/PD), 6 tiers for MV & PD (dollar+percent), corner $ + corner %, orange after-tax net in grid, list shows tax then $ + %, PD overlay only on the cheapest vs next, T5/T6 semi-transparent, debounced/visible-only passes. Compact (~50%) and auto-fit to phone viewport. Author: BazookaJoe.
 // @author       BazookaJoe
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/imarket.php*
@@ -13,7 +13,7 @@
 // @grant        GM_addStyle
 // @grant        GM.xmlHttpRequest
 //
-// Auto-update placeholders (swap to your repo if desired):
+// Auto-update (raw links for PDA):
 // @downloadURL  https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/PDA-torm-market-suite.user.js
 // @updateURL    https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/PDA-torm-market-suite.user.js
 // ==/UserScript==
@@ -162,6 +162,17 @@
     .tms-input{width:100%;padding:6px 8px;border-radius:6px;border:1px solid #555;background:#1f1f1f;color:#eee;font-size:12px}
     .tms-btn{width:100%;margin-top:6px;padding:8px 10px;border:none;border-radius:6px;background:#2e9e4f;color:#fff;font-weight:700;cursor:pointer;font-size:12px}
     .tms-btn.ghost{background:#444}
+
+    /* Desktop-style accents */
+    .tms-btn.primary{background:#1e66ff}
+    .tms-btn.success{background:#2e9e4f}
+    .tms-btn.destructive{background:#555}
+    .tms-btn:disabled{opacity:.6;cursor:not-allowed}
+    .tms-subhead{font-weight:700;margin:6px 0 4px;opacity:.9}
+    .tms-th-cols{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .tms-th-box{border:1px solid #444;border-radius:8px;padding:8px;background:#1d1d1d}
+    .tms-th-title{font-size:12px;margin-bottom:6px;opacity:.8}
+    .tms-th-grid{display:grid;grid-template-columns:auto 1fr;gap:6px;align-items:center}
   `);
 
   // --- utils ---
@@ -232,7 +243,7 @@
     } catch (e) { if (click) alert(`API error: ${e.message}`); }
   }
 
-  // --- UI panel (Main / MV / PD) ---
+  // --- UI helpers ---
   function switchRow(label, id, checked) {
     return `
       <div class="tms-row">
@@ -281,6 +292,7 @@
     floating.style.setProperty('--tms-scale', scale.toFixed(3));
   }
 
+  // --- UI panel (Main / MV / PD) ---
   function buildUI() {
     if (document.getElementById('tms-floating')) return;
 
@@ -292,83 +304,110 @@
     const floating = document.createElement('div');
     floating.id = 'tms-floating';
     floating.innerHTML = `
-      <h3>Market Suite <button id="tms-close" title="Close">×</button></h3>
+      <h3>Torn Market Suite <button id="tms-close" title="Close">×</button></h3>
+
       <div class="tms-tabs">
         <div class="tms-tab active" data-tab="main">Main</div>
-        <div class="tms-tab" data-tab="mv">MV</div>
-        <div class="tms-tab" data-tab="pd">PD</div>
+        <div class="tms-tab" data-tab="mv">MV Highlight</div>
+        <div class="tms-tab" data-tab="pd">Price Diff</div>
       </div>
 
+      <!-- MAIN -->
       <div class="tms-card tms-pane" data-pane="main">
-        ${switchRow('Enabled (master)', 'tms-master', S.master)}
-        ${switchRow('Show MV', 'tms-mvEnabled', S.mvEnabled)}
-        ${switchRow('MV: Dollar mode', 'tms-mvDollar', S.mvDollarMode)}
-        ${switchRow('MV: Percent mode', 'tms-mvPercent', S.mvPercentMode)}
-        ${switchRow('Show PD', 'tms-pdEnabled', S.pdEnabled)}
-        ${switchRow('PD: Dollar mode (cheapest vs next)', 'tms-pdDollar', S.pdDollarMode)}
-        ${switchRow('PD: Percent mode (cheapest vs next)', 'tms-pdPercent', S.pdPercentMode)}
-        <hr>
-        ${switchRow('Corner % chip', 'tms-showPct', S.showPct)}
-        ${switchRow('Corner $ chip', 'tms-showDol', S.showDol)}
-        ${switchRow('Show tax (orange)', 'tms-showTax', S.showTax)}
-        <hr>
-        ${switchRow('Process visible tiles only', 'tms-visibleOnly', S.visibleOnly)}
-        <div class="tms-grid">
+        ${switchRow('Enabled', 'tms-master', S.master)}
+        ${switchRow('Show % / $ (list/grid)', 'tms-showPct', S.showPct)}
+        ${switchRow('Show after-tax', 'tms-showTax', S.showTax)}
+        ${switchRow('Visible only', 'tms-visibleOnly', S.visibleOnly)}
+        <div class="tms-grid" style="margin-top:6px">
           <label>Max per pass</label>
           <input class="tms-input" id="tms-maxpass" type="number" min="10" step="10" value="${S.maxPerPass}">
         </div>
-        <button class="tms-btn" id="tms-reprocess">Reprocess</button>
+
+        <div class="tms-subhead" style="margin-top:10px">Torn API key</div>
+        <input class="tms-input" id="tms-apikey" placeholder="XXXX..." value="${S.apiKey}">
+        <button class="tms-btn primary" id="tms-savekey" style="margin-top:8px">Save key</button>
+        <button class="tms-btn success" id="tms-refresh-mv" style="margin-top:8px">Refresh Market Values</button>
+
+        <button class="tms-btn ghost" id="tms-reprocess" style="margin-top:10px">Reprocess</button>
       </div>
 
+      <!-- MV -->
       <div class="tms-card tms-pane tms-hidden" data-pane="mv">
-        <div class="tms-grid">
-          <label>Torn API key</label>
-          <input class="tms-input" id="tms-apikey" placeholder="XXXX..." value="${S.apiKey}">
+        ${switchRow('Enabled', 'tms-mvEnabled', S.mvEnabled)}
+        ${switchRow('$ mode', 'tms-mvDollar', S.mvDollarMode)}
+        ${switchRow('% mode', 'tms-mvPercent', S.mvPercentMode)}
+
+        <div class="tms-th-cols" style="margin-top:8px">
+          <div class="tms-th-box">
+            <div class="tms-th-title">$ Thresholds</div>
+            <div class="tms-th-grid">
+              <label>Tier 6 ≥</label><input class="tms-input" id="mv_d_t6" type="number" value="${S.mvDollarThresholds.tier6}">
+              <label>Tier 5 ≥</label><input class="tms-input" id="mv_d_t5" type="number" value="${S.mvDollarThresholds.tier5}">
+              <label>Tier 4 ≥</label><input class="tms-input" id="mv_d_t4" type="number" value="${S.mvDollarThresholds.tier4}">
+              <label>Tier 3 ≥</label><input class="tms-input" id="mv_d_t3" type="number" value="${S.mvDollarThresholds.tier3}">
+              <label>Tier 2 ≥</label><input class="tms-input" id="mv_d_t2" type="number" value="${S.mvDollarThresholds.tier2}">
+              <label>Tier 1 ≥</label><input class="tms-input" id="mv_d_t1" type="number" value="${S.mvDollarThresholds.tier1}">
+            </div>
+            <button class="tms-btn success" id="mv-save" style="margin-top:8px">Save $</button>
+          </div>
+
+          <div class="tms-th-box">
+            <div class="tms-th-title">% Thresholds</div>
+            <div class="tms-th-grid">
+              <label>Tier 6 ≥</label><input class="tms-input" id="mv_p_t6" type="number" value="${S.mvPercentThresholds.tier6}">
+              <label>Tier 5 ≥</label><input class="tms-input" id="mv_p_t5" type="number" value="${S.mvPercentThresholds.tier5}">
+              <label>Tier 4 ≥</label><input class="tms-input" id="mv_p_t4" type="number" value="${S.mvPercentThresholds.tier4}">
+              <label>Tier 3 ≥</label><input class="tms-input" id="mv_p_t3" type="number" value="${S.mvPercentThresholds.tier3}">
+              <label>Tier 2 ≥</label><input class="tms-input" id="mv_p_t2" type="number" value="${S.mvPercentThresholds.tier2}">
+              <label>Tier 1 ≥</label><input class="tms-input" id="mv_p_t1" type="number" value="${S.mvPercentThresholds.tier1}">
+            </div>
+            <button class="tms-btn success" id="mv-save-pct" style="margin-top:8px">Save %</button>
+          </div>
         </div>
-        <button class="tms-btn" id="tms-refresh-mv">Refresh MV from Torn API</button>
-        <div style="height:6px"></div>
-        <div class="tms-grid">
-          <label>MV $ tier6</label><input class="tms-input" id="mv_d_t6" type="number" value="${S.mvDollarThresholds.tier6}">
-          <label>MV $ tier5</label><input class="tms-input" id="mv_d_t5" type="number" value="${S.mvDollarThresholds.tier5}">
-          <label>MV $ tier4</label><input class="tms-input" id="mv_d_t4" type="number" value="${S.mvDollarThresholds.tier4}">
-          <label>MV $ tier3</label><input class="tms-input" id="mv_d_t3" type="number" value="${S.mvDollarThresholds.tier3}">
-          <label>MV $ tier2</label><input class="tms-input" id="mv_d_t2" type="number" value="${S.mvDollarThresholds.tier2}">
-          <label>MV $ tier1</label><input class="tms-input" id="mv_d_t1" type="number" value="${S.mvDollarThresholds.tier1}">
-        </div>
-        <div class="tms-grid" style="margin-top:6px">
-          <label>MV % tier6</label><input class="tms-input" id="mv_p_t6" type="number" value="${S.mvPercentThresholds.tier6}">
-          <label>MV % tier5</label><input class="tms-input" id="mv_p_t5" type="number" value="${S.mvPercentThresholds.tier5}">
-          <label>MV % tier4</label><input class="tms-input" id="mv_p_t4" type="number" value="${S.mvPercentThresholds.tier4}">
-          <label>MV % tier3</label><input class="tms-input" id="mv_p_t3" type="number" value="${S.mvPercentThresholds.tier3}">
-          <label>MV % tier2</label><input class="tms-input" id="mv_p_t2" type="number" value="${S.mvPercentThresholds.tier2}">
-          <label>MV % tier1</label><input class="tms-input" id="mv_p_t1" type="number" value="${S.mvPercentThresholds.tier1}">
-        </div>
-        <button class="tms-btn" id="mv-save">Save MV tiers</button>
+
+        <button class="tms-btn destructive" id="mv-reset-defaults" style="margin-top:8px">Reset MV defaults</button>
       </div>
 
+      <!-- PD -->
       <div class="tms-card tms-pane tms-hidden" data-pane="pd">
-        <div class="tms-grid">
-          <label>PD $ tier6</label><input class="tms-input" id="pd_d_t6" type="number" value="${S.pdDollarThresholds.tier6}">
-          <label>PD $ tier5</label><input class="tms-input" id="pd_d_t5" type="number" value="${S.pdDollarThresholds.tier5}">
-          <label>PD $ tier4</label><input class="tms-input" id="pd_d_t4" type="number" value="${S.pdDollarThresholds.tier4}">
-          <label>PD $ tier3</label><input class="tms-input" id="pd_d_t3" type="number" value="${S.pdDollarThresholds.tier3}">
-          <label>PD $ tier2</label><input class="tms-input" id="pd_d_t2" type="number" value="${S.pdDollarThresholds.tier2}">
-          <label>PD $ tier1</label><input class="tms-input" id="pd_d_t1" type="number" value="${S.pdDollarThresholds.tier1}">
+        ${switchRow('Enabled', 'tms-pdEnabled', S.pdEnabled)}
+        ${switchRow('$ mode', 'tms-pdDollar', S.pdDollarMode)}
+        ${switchRow('% mode', 'tms-pdPercent', S.pdPercentMode)}
+
+        <div class="tms-th-cols" style="margin-top:8px">
+          <div class="tms-th-box">
+            <div class="tms-th-title">$ Thresholds</div>
+            <div class="tms-th-grid">
+              <label>Tier 6 ≥</label><input class="tms-input" id="pd_d_t6" type="number" value="${S.pdDollarThresholds.tier6}">
+              <label>Tier 5 ≥</label><input class="tms-input" id="pd_d_t5" type="number" value="${S.pdDollarThresholds.tier5}">
+              <label>Tier 4 ≥</label><input class="tms-input" id="pd_d_t4" type="number" value="${S.pdDollarThresholds.tier4}">
+              <label>Tier 3 ≥</label><input class="tms-input" id="pd_d_t3" type="number" value="${S.pdDollarThresholds.tier3}">
+              <label>Tier 2 ≥</label><input class="tms-input" id="pd_d_t2" type="number" value="${S.pdDollarThresholds.tier2}">
+              <label>Tier 1 ≥</label><input class="tms-input" id="pd_d_t1" type="number" value="${S.pdDollarThresholds.tier1}">
+            </div>
+            <button class="tms-btn success" id="pd-save" style="margin-top:8px">Save $</button>
+          </div>
+
+          <div class="tms-th-box">
+            <div class="tms-th-title">% Thresholds</div>
+            <div class="tms-th-grid">
+              <label>Tier 6 ≥</label><input class="tms-input" id="pd_p_t6" type="number" value="${S.pdPercentThresholds.tier6}">
+              <label>Tier 5 ≥</label><input class="tms-input" id="pd_p_t5" type="number" value="${S.pdPercentThresholds.tier5}">
+              <label>Tier 4 ≥</label><input class="tms-input" id="pd_p_t4" type="number" value="${S.pdPercentThresholds.tier4}">
+              <label>Tier 3 ≥</label><input class="tms-input" id="pd_p_t3" type="number" value="${S.pdPercentThresholds.tier3}">
+              <label>Tier 2 ≥</label><input class="tms-input" id="pd_p_t2" type="number" value="${S.pdPercentThresholds.tier2}">
+              <label>Tier 1 ≥</label><input class="tms-input" id="pd_p_t1" type="number" value="${S.pdPercentThresholds.tier1}">
+            </div>
+            <button class="tms-btn success" id="pd-save-pct" style="margin-top:8px">Save %</button>
+          </div>
         </div>
-        <div class="tms-grid" style="margin-top:6px">
-          <label>PD % tier6</label><input class="tms-input" id="pd_p_t6" type="number" value="${S.pdPercentThresholds.tier6}">
-          <label>PD % tier5</label><input class="tms-input" id="pd_p_t5" type="number" value="${S.pdPercentThresholds.tier5}">
-          <label>PD % tier4</label><input class="tms-input" id="pd_p_t4" type="number" value="${S.pdPercentThresholds.tier4}">
-          <label>PD % tier3</label><input class="tms-input" id="pd_p_t3" type="number" value="${S.pdPercentThresholds.tier3}">
-          <label>PD % tier2</label><input class="tms-input" id="pd_p_t2" type="number" value="${S.pdPercentThresholds.tier2}">
-          <label>PD % tier1</label><input class="tms-input" id="pd_p_t1" type="number" value="${S.pdPercentThresholds.tier1}">
-        </div>
-        <button class="tms-btn" id="pd-save">Save PD tiers</button>
+
+        <button class="tms-btn destructive" id="pd-reset-defaults" style="margin-top:8px">Reset PD defaults</button>
       </div>
     `;
     document.body.appendChild(floating);
 
-    // open/close & autoscale
+    // open/close & autoscale — keep PDA behavior
     toggle.addEventListener('click', () => {
       floating.classList.toggle('open');
       tmsApplyAutoScale();
@@ -386,7 +425,7 @@
       });
     });
 
-    // switches
+    // switches (unchanged wiring)
     bindSwitch('tms-master', v => { S.master = v; save(K.MASTER, v); scheduleRender(); });
     bindSwitch('tms-mvEnabled', v => { S.mvEnabled = v; save(K.MV_ENABLED, v); scheduleRender(); });
     bindSwitch('tms-mvDollar', v => { S.mvDollarMode = v; save(K.MV_DOLLAR, v); scheduleRender(); });
@@ -395,9 +434,11 @@
     bindSwitch('tms-pdDollar', v => { S.pdDollarMode = v; save(K.PD_DOLLAR, v); scheduleRender(); });
     bindSwitch('tms-pdPercent', v => { S.pdPercentMode = v; save(K.PD_PERCENT, v); scheduleRender(); });
     bindSwitch('tms-showPct', v => { S.showPct = v; save(K.SHOW_PCT, v); scheduleRender(); });
-    bindSwitch('tms-showDol', v => { S.showDol = v; save(K.SHOW_DOL, v); scheduleRender(); });
     bindSwitch('tms-showTax', v => { S.showTax = v; save(K.SHOW_TAX, v); scheduleRender(); });
     bindSwitch('tms-visibleOnly', v => { S.visibleOnly = v; save(K.PERF_VISIBLE, v); });
+
+    // keep the $ chip toggle available in storage (not shown here); if you want the separate UI switch again, re-enable below:
+    // bindSwitch('tms-showDol', v => { S.showDol = v; save(K.SHOW_DOL, v); scheduleRender(); });
 
     // max per pass
     floating.querySelector('#tms-maxpass').addEventListener('change', e => {
@@ -405,22 +446,43 @@
       S.maxPerPass = v; save(K.PERF_MAXPASS, v);
     });
 
-    // MV tab
-    floating.querySelector('#tms-apikey').addEventListener('change', e => {
+    // API key + actions
+    const apikeyInput = floating.querySelector('#tms-apikey');
+    floating.querySelector('#tms-savekey').onclick = () => {
+      S.apiKey = (apikeyInput.value || '').trim(); save(K.API_KEY, S.apiKey);
+      alert('API key saved.');
+    };
+    apikeyInput.addEventListener('change', e => {
       S.apiKey = e.target.value.trim(); save(K.API_KEY, S.apiKey);
     });
     floating.querySelector('#tms-refresh-mv').onclick = () => refreshMV(true);
+
+    // MV / PD save + reset
     floating.querySelector('#mv-save').onclick = () => {
       S.mvDollarThresholds = read6('mv_d_'); save(K.MV_D_THR, S.mvDollarThresholds);
-      S.mvPercentThresholds = read6('mv_p_'); save(K.MV_P_THR, S.mvPercentThresholds);
-      alert('MV tiers saved.'); scheduleRender();
+      alert('MV $ tiers saved.'); scheduleRender();
     };
-
-    // PD tab
+    floating.querySelector('#mv-save-pct').onclick = () => {
+      S.mvPercentThresholds = read6('mv_p_'); save(K.MV_P_THR, S.mvPercentThresholds);
+      alert('MV % tiers saved.'); scheduleRender();
+    };
     floating.querySelector('#pd-save').onclick = () => {
       S.pdDollarThresholds = read6('pd_d_'); save(K.PD_D_THR, S.pdDollarThresholds);
+      alert('PD $ tiers saved.'); scheduleRender();
+    };
+    floating.querySelector('#pd-save-pct').onclick = () => {
       S.pdPercentThresholds = read6('pd_p_'); save(K.PD_P_THR, S.pdPercentThresholds);
-      alert('PD tiers saved.'); scheduleRender();
+      alert('PD % tiers saved.'); scheduleRender();
+    };
+    floating.querySelector('#mv-reset-defaults').onclick = () => {
+      S.mvDollarThresholds = { ...DEF_DOLLAR }; save(K.MV_D_THR, S.mvDollarThresholds);
+      S.mvPercentThresholds = { ...DEF_PERCENT }; save(K.MV_P_THR, S.mvPercentThresholds);
+      alert('MV thresholds reset.'); scheduleRender();
+    };
+    floating.querySelector('#pd-reset-defaults').onclick = () => {
+      S.pdDollarThresholds = { ...DEF_DOLLAR }; save(K.PD_D_THR, S.pdDollarThresholds);
+      S.pdPercentThresholds = { ...DEF_PERCENT }; save(K.PD_P_THR, S.pdPercentThresholds);
+      alert('PD thresholds reset.'); scheduleRender();
     };
 
     // initial autoscale + resize listener
@@ -584,7 +646,7 @@
 
       const priceEl =
         scope.querySelector('.priceAndTotal___eEVS7') ||
-        scope.querySelector('.price___Uwiv2') ||
+        scope.querySelector('.price##_Uwiv2') ||
         scope.querySelector('[class*="price_"]') || scope;
       const price = parsePrice(priceEl?.textContent || '');
       if (!price) continue;
