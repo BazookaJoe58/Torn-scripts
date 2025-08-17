@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Market Suite (MV/PD + Corner % + List stack $ then %) - Toggleable Panel
 // @namespace    http://tampermonkey.net/
-// @version      5.1.3
+// @version      5.1.4
 // @description  Three-tab UI (Main/MV/PD). Full-tile/row overlay (T5/T6 semi-transparent). Grid: corner $ + corner % + orange after-tax profit (>0 only); List: tax lines then $ delta then % delta under price. PD overlay only on the single cheapest listing vs the next higher price. Panel opens/closes via MS toggle, has a close (×) button, and supports Esc. Fonts +1px. MS tab always visible. Auto-refreshes MV every 5 min. Author: BazookaJoe.
 // @author       BazookaJoe
 // @license      MIT
@@ -51,7 +51,6 @@
     PERF_MAXPASS: 'TMS_maxPerPass_v1',
   };
 
-  // Default thresholds (your numbers)
   const DEF_DOLLAR  = { tier6: 60000, tier5: 50000, tier4: 40000, tier3: 30000, tier2: 20000, tier1: 10000 };
   const DEF_PERCENT = { tier6:    14, tier5:    13, tier4:    12, tier3:    11, tier2:    10, tier1:     9 };
 
@@ -74,8 +73,8 @@
     pdPercentThresholds: { ...DEF_PERCENT },
 
     showTax: true,
-    showPct: true,   // list & grid % badges
-    showDol: true,   // grid corner $ tag(s)
+    showPct: true,
+    showDol: true,
 
     visibleOnly: true,
     maxPerPass: 60,
@@ -293,21 +292,16 @@
     toggle.id = 'tms-toggle'; toggle.textContent = 'MS';
     document.body.appendChild(toggle);
 
-    // Open/close with MS button (direct binding)
     toggle.addEventListener('click', () => panel.classList.toggle('open'));
-    // Robust fallback binding
     document.addEventListener('click', (e) => {
       if (e.target && e.target.id === 'tms-toggle') {
         const p = document.getElementById('tms-floating');
         if (p) p.classList.toggle('open');
       }
     });
-    // Close button inside header
     panel.querySelector('#tms-close')?.addEventListener('click', () => panel.classList.remove('open'));
-    // Esc to close
     window.addEventListener('keydown', (e) => { if (e.key === 'Escape') panel.classList.remove('open'); });
 
-    // Tabs
     const tabs = panel.querySelectorAll('.tms-tab');
     const pages = {
       main: panel.querySelector('#tms-tab-main'),
@@ -321,7 +315,6 @@
       pages[t.dataset.tab].classList.remove('tms-hidden');
     }));
 
-    // Threshold grids
     const renderGrid = (root, thr, isPercent=false) => {
       root.innerHTML = '';
       for (let i = 6; i >= 1; i--) {
@@ -339,7 +332,6 @@
     };
 
     const $ = s => panel.querySelector(s);
-    // Main tab vals
     $('#tms-master').checked = S.master;
     $('#tms-pct').checked   = S.showPct;
     $('#tms-tax').checked   = S.showTax;
@@ -347,21 +339,18 @@
     $('#tms-max').value     = String(S.maxPerPass);
     $('#tms-key').value     = S.apiKey || '';
 
-    // MV tab
     $('#tms-mv-enabled').checked = S.mvEnabled;
     $('#tms-mv-dollar').checked  = S.mvDollarMode;
     $('#tms-mv-percent').checked = S.mvPercentMode;
     renderGrid($('#tms-mv-dollar-grid'),  S.mvDollarThresholds,  false);
     renderGrid($('#tms-mv-percent-grid'), S.mvPercentThresholds, true);
 
-    // PD tab
     $('#tms-pd-enabled').checked = S.pdEnabled;
     $('#tms-pd-dollar').checked  = S.pdDollarMode;
     $('#tms-pd-percent').checked = S.pdPercentMode;
     renderGrid($('#tms-pd-dollar-grid'),  S.pdDollarThresholds,  false);
     renderGrid($('#tms-pd-percent-grid'), S.pdPercentThresholds, true);
 
-    // Listeners
     $('#tms-master').addEventListener('change', e => { S.master = e.target.checked; save(K.MASTER, S.master); handleChange(); });
     $('#tms-pct').addEventListener('change', e => { S.showPct = e.target.checked; save(K.SHOW_PCT, S.showPct); handleChange(); });
     $('#tms-tax').addEventListener('change', e => { S.showTax = e.target.checked; save(K.SHOW_TAX, S.showTax); handleChange(); });
@@ -403,7 +392,6 @@
     });
   }
 
-  // ---- helpers for visuals ----
   const tierClass = (thr, value, prefix) => {
     if (value >= thr.tier6) return `${prefix}-6`;
     if (value >= thr.tier5) return `${prefix}-5`;
@@ -440,7 +428,7 @@
     if (!S.showPct) return;
     scope.querySelector(':scope > .tms-corner-pct')?.remove();
     const t = document.createElement('div');
-    t.className = 'tms-corner-pct ' + (pct > 0 ? 'neg' : 'pos'); // neg=profit(green), pos=loss(red)
+    t.className = 'tms-corner-pct ' + (pct > 0 ? 'neg' : 'pos');
     t.textContent = `${pct > 0 ? '-' : '+'}${Math.abs(pct)}%`;
     scope.appendChild(t);
   }
@@ -465,7 +453,8 @@
       wrap.appendChild(tax);
     }
 
-    if (S.showPct || S.showDol) {
+    // Only add $/% deltas if MV exists
+    if (mv != null && (S.showPct || S.showDol)) {
       const moneyDelta = mv - price;
       const b$ = document.createElement('span');
       b$.className = 'tms-badge dol ' + (moneyDelta > 0 ? 'neg' : 'pos');
@@ -487,8 +476,8 @@
   function applyMVHighlight(scope, price) {
     if (!S.mvEnabled) return '';
     const id = getItemIdFromScope(scope);
-    if (!id || price == null || !S.mv[id]) return '';
-    const mv = S.mv[id];
+    const mv = id ? S.mv[id] : null;
+    if (price == null || mv == null) return '';
     const profit = Math.round(mv - price);
     addCornerProfit(scope, profit);
     addCornerPct(scope, Math.round(((mv - price) / Math.max(mv,1)) * 100));
@@ -529,20 +518,21 @@
 
       const id = getItemIdFromScope(tile);
       const mv = id ? S.mv[id] : null;
-      if (!mv) { processed.add(tile); return; }
 
       if (S.master) {
         const cover = ensureScope(tile);
 
-        // Grid: keep corner $ + %; no under-price stack
+        // Grid: no under-price stack
         priceEl?.querySelector('.tms-underprice')?.remove();
 
-        const cls = applyMVHighlight(tile, price);
-
-        // Orange after-tax profit (MV*0.95 - price) — show only if > 0
-        const netProfit = Math.round(mv * 0.95 - price);
+        // MV highlight if we have MV
+        const cls = mv != null ? applyMVHighlight(tile, price) : '';
+        // Orange after-tax profit if MV exists and > 0
         tile.querySelector(':scope > .tms-corner-tax')?.remove();
-        if (netProfit > 0) addCornerTaxProfit(tile, netProfit);
+        if (mv != null) {
+          const netProfit = Math.round(mv * 0.95 - price);
+          if (netProfit > 0) addCornerTaxProfit(tile, netProfit);
+        }
 
         setCoverClass(cover, cls);
       }
@@ -576,19 +566,18 @@
 
       const id = getItemIdFromScope(row);
       const mv = id ? S.mv[id] : null;
-      if (!mv) { processed.add(row); return; }
 
       if (S.master) {
         const cover = ensureScope(row);
 
-        // Under-price stack (list-only): tax -> $ delta -> % delta
+        // Under-price stack: always show tax; show $/% only if MV exists
         priceEl?.querySelector('.tms-underprice')?.remove();
         priceEl.appendChild(buildUnderPrice(price, mv));
 
-        // Highlights
-        let cls = applyMVHighlight(row, price);
+        // MV highlight if MV exists
+        let cls = mv != null ? applyMVHighlight(row, price) : '';
 
-        // Only cheapest row can receive PD highlight (vs next higher)
+        // Only cheapest row can receive PD highlight (vs next higher), MV not required
         if (idx === cheapestIndex) {
           const pd = applyPDDiscountHighlight(price, nextHigherPrice);
           if (!cls && pd) cls = pd;
@@ -638,7 +627,6 @@
       processed.clear();
       document.querySelectorAll('.tms-underprice, .tms-profit-tag, .tms-corner-pct, .tms-corner-tax, .tms-cover').forEach(n=>n.remove());
 
-      // MS tab: always visible (never hide)
       const toggle = document.getElementById('tms-toggle');
       if (toggle) toggle.classList.remove('hidden');
 
@@ -657,7 +645,6 @@
   new MutationObserver(handleChange).observe(document.body, { childList:true, subtree:true });
   window.addEventListener('hashchange', handleChange);
 
-  // Safety rebind for MS toggle if DOM re-renders (times out after 15s)
   (function ensureToggleHook(){
     const rebind = () => {
       const toggle = document.getElementById('tms-toggle');
@@ -676,11 +663,9 @@
   // ---- Auto-refresh MV every 5 minutes (silent) ----
   function autoRefreshMV() {
     if (!S.apiKey) return;
-    // click=false => no alerts
     refreshMV(false);
   }
-  setInterval(autoRefreshMV, 5 * 60 * 1000); // 5 minutes
-  // Kick one after load (without alert) if we have a key
+  setInterval(autoRefreshMV, 5 * 60 * 1000);
   autoRefreshMV();
 
   handleChange();
