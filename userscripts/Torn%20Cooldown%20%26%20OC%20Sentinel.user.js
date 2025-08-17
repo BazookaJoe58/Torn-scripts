@@ -1,14 +1,15 @@
 // ==UserScript==
 // @name         Torn Cooldown & OC Sentinel
 // @namespace    http://tampermonkey.net/
-// @version      1.3.5
-// @description  Semi-transparent full-screen flash + modal acknowledge for: Drug (0), Booster (≤20h), Education finish, OC finished / Not in OC. PDA-friendly, draggable, minimisable. Single API key (Limited recommended). Overlay is click-through; modal captures clicks. Author: BazookaJoe.
+// @version      1.3.7
+// @description  Semi-transparent full-screen flash + modal acknowledge for: Drug (0), Booster (≤20h), Education finish, OC finished / Not in OC. PDA-friendly, draggable, minimisable (default minimised). Single API key (Limited recommended). Overlay is click-through; modal captures clicks. Author: BazookaJoe.
 // @author       BazookaJoe
 // @match        https://www.torn.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
 // @connect      api.torn.com
 // @downloadURL  https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/Torn%20Cooldown%20%26%20OC%20Sentinel.user.js
@@ -28,17 +29,20 @@
   const SNOOZE_MS = 5 * 60_000;          // 5 min per-alert snooze
   const BOOSTER_THRESHOLD_S = 20 * 3600; // 20 hours
   const NOT_IN_OC_COOLDOWN_MS = 30 * 60_000;
-  const REATTACH_MS = 3000;              // periodic safety restore cadence
+  const REATTACH_MS = 3000;              // periodic safety reattach
+  const SAVE_DEBOUNCE_MS = 400;          // API key debounce
 
   const STORAGE = {
-    key: 'tcos_api_key_v5',
+    key: 'tcos_api_key_v5',       // single API key (Limited recommended)
+    keyV4: 'tcos_api_key_v4',     // migration
+    keyV3: 'tcos_api_key_v3',
     toggles: 'tcos_toggles_v5',
     snooze: 'tcos_snooze_v5',
     last: 'tcos_last_v5',
     ends: 'tcos_ends_v5',
     pos: 'tcos_panel_pos_v1',
-    pillPos: 'tcos_pill_pos_v1',     // NEW: draggable pill position
-    minimized: 'tcos_panel_min_v1',
+    pillPos: 'tcos_pill_pos_v1',
+    minimized: 'tcos_panel_min_v1', // true = minimised
   };
 
   // Alerts + colors (semi-transparent)
@@ -93,6 +97,14 @@
   function qs(id) { return document.getElementById(id); }
   function root()  { return document.body || document.documentElement; }
   function safeAppend(el) { try { root().appendChild(el); } catch {} }
+
+  function debounce(fn, wait) {
+    let t = null;
+    return function(...args) {
+      clearTimeout(t);
+      t = setTimeout(() => fn.apply(this, args), wait);
+    };
+  }
 
   // =========================
   // Styles
@@ -167,7 +179,7 @@
       font-family:monospace;
       font-size:12px;
       z-index:2147483644;
-      cursor:move; /* NEW: show it's draggable */
+      cursor:move;
       user-select:none;
     }
     .tcos-pill div{display:flex;justify-content:space-between;gap:8px;}
@@ -311,9 +323,8 @@
       masterToggle.dataset.bound = '1';
     }
 
-    // Draggable header binding (idempotent)
+    // Draggable bindings (idempotent)
     makePanelDraggable();
-    // NEW: Draggable pill binding (idempotent)
     makePillDraggable();
 
     // Keep pill visible when enabled
@@ -321,6 +332,20 @@
 
     // Restore saved pill position if available
     restorePillPosition();
+
+    // API key: save on type (debounced) + on blur
+    if (!keyInput.dataset.bound) {
+      const saveKey = debounce(async () => {
+        API_KEY = keyInput.value.trim();
+        await GM_setValue(STORAGE.key, API_KEY);
+      }, SAVE_DEBOUNCE_MS);
+      keyInput.addEventListener('input', saveKey);
+      keyInput.addEventListener('blur', async () => {
+        API_KEY = keyInput.value.trim();
+        await GM_setValue(STORAGE.key, API_KEY);
+      });
+      keyInput.dataset.bound = '1';
+    }
   }
 
   function bindOnce(id, evt, fn) {
@@ -334,15 +359,34 @@
   // =========================
   // Persist
   // =========================
+  async function migrateKey() {
+    const v5 = await GM_getValue(STORAGE.key, '');
+    if (v5) return v5;
+    const v4 = await GM_getValue(STORAGE.keyV4, '');
+    const v3 = await GM_getValue(STORAGE.keyV3, '');
+    const migrated = v4 || v3 || '';
+    if (migrated) await GM_setValue(STORAGE.key, migrated);
+    return migrated;
+  }
+
   async function loadPersisted() {
-    API_KEY = await GM_getValue(STORAGE.key, '');
+    API_KEY = await migrateKey();
+    if (!API_KEY) API_KEY = await GM_getValue(STORAGE.key, '');
+
     toggles = await GM_getValue(STORAGE.toggles, { ...DEFAULT_TOGGLES });
     snoozeUntil = await GM_getValue(STORAGE.snooze, {});
     last = await GM_getValue(STORAGE.last, {});
     ends = await GM_getValue(STORAGE.ends, ends);
+
     const pos = await GM_getValue(STORAGE.pos, null);
     const pillPos = await GM_getValue(STORAGE.pillPos, null);
-    const min = await GM_getValue(STORAGE.minimized, false);
+
+    // DEFAULT MINIMISED = true (until user opens it)
+    let min = await GM_getValue(STORAGE.minimized, undefined);
+    if (typeof min === 'undefined') {
+      min = true;
+      await GM_setValue(STORAGE.minimized, true);
+    }
 
     keyInput.value = API_KEY || '';
     drugToggle.checked = !!toggles.drug;
@@ -357,15 +401,15 @@
       panel.style.right = 'auto';
     }
     if (pillPos && typeof pillPos.x === 'number' && typeof pillPos.y === 'number') {
-      // Apply saved pill position
       pill.style.left = `${pillPos.x}px`;
       pill.style.top = `${pillPos.y}px`;
       pill.style.right = 'auto';
-      pill.style.transform = 'translateY(0)'; // when manually positioned, no translate
+      pill.style.transform = 'translateY(0)';
     }
 
     setMinimised(min);
   }
+
   async function persist() {
     await GM_setValue(STORAGE.key, API_KEY);
     await GM_setValue(STORAGE.toggles, toggles);
@@ -418,7 +462,7 @@
   // =========================
   function xhrJSON(url) {
     return new Promise((resolve, reject) => {
-      GM.xmlHttpRequest({
+      (GM.xmlHttpRequest || GM_xmlhttpRequest)({
         method: 'GET',
         url,
         onload: (res) => {
@@ -628,7 +672,7 @@
     head.dataset.bound = '1';
   }
 
-  // NEW: make the pill draggable & persist its position
+  // Draggable pill & persist position
   function makePillDraggable() {
     if (!pill || pill.dataset.bound) return;
 
@@ -642,7 +686,7 @@
       offsetX = cx - rect.left;
       offsetY = cy - rect.top;
 
-      // When user starts dragging, switch to left/top positioning
+      // switch to left/top positioning while dragging
       pill.style.right = 'auto';
       pill.style.transform = 'translateY(0)';
       e.preventDefault();
@@ -679,11 +723,9 @@
   }
 
   function restorePillPosition() {
-    // If a saved position exists, loadPersisted already applied it.
-    // If not, ensure it's docked under the right mini-tab by default.
     GM_getValue(STORAGE.pillPos, null).then((pillPos) => {
       if (!pillPos) {
-        pill.style.left = ''; // use CSS right/top default docking
+        pill.style.left = '';
         pill.style.top = '';
         pill.style.right = '0';
         pill.style.transform = 'translateY(-50%)';
@@ -746,14 +788,14 @@
     ocDomTimer = setInterval(scanOCDom, OC_DOM_SCAN_MS);
     scanOCDom();
 
-    // Ensure visibility
+    // Ensure pill visibility if enabled
     if (masterToggle.checked) pill.style.display = 'block';
 
     // MutationObserver: if our nodes get removed, recreate
     const mo = new MutationObserver(() => {
       if (!qs('tcos-panel') || !qs('tcos-minitab') || !document.querySelector('.tcos-pill') || !qs('tcos-overlay') || !qs('tcos-modal-wrap')) {
         ensureUI();
-        makePillDraggable(); // rebind pill drag if recreated
+        makePillDraggable(); // rebind if recreated
       }
     });
     mo.observe(document.documentElement, { childList: true, subtree: true });
