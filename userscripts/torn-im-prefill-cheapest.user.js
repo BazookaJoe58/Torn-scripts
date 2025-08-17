@@ -1,14 +1,12 @@
 // ==UserScript==
-// @name         Torn Item Market — Prefill Cheapest (Max Affordable)
+// @name         Torn Item Market — Prefill Cheapest (On Amount Focus)
 // @namespace    https://torn.city/
-// @version      1.0.1
-// @description  In Item Market list view, auto-prefill the Buy amount on the cheapest visible listing with the maximum you can afford from wallet cash. UI helper only—no auto-buy.
+// @version      1.0.2
+// @description  When you click/focus the amount box in Item Market list view, auto-fill it with the maximum you can afford from wallet for that listing (never auto-buys).
 // @author       BazookaJoe
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
-// @grant        GM_getValue
-// @grant        GM_setValue
-// @grant        GM_addStyle
+// @grant        none
 // @run-at       document-idle
 // @downloadURL  https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/torn-im-prefill-cheapest.user.js
 // @updateURL    https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/torn-im-prefill-cheapest.user.js
@@ -17,72 +15,58 @@
 (function () {
   'use strict';
 
-  // --- small helpers ---
+  // ---------- helpers ----------
   const parseMoney = (txt) => {
     if (!txt) return NaN;
     const cleaned = String(txt).replace(/[^\d.]/g, '');
     return cleaned ? Math.floor(Number(cleaned)) : NaN;
   };
 
-  const textToInt = (txt) => {
+  const toInt = (txt) => {
     if (!txt) return NaN;
     const m = String(txt).match(/\d[\d,]*/);
     return m ? Number(m[0].replace(/[^\d]/g, '')) : NaN;
   };
 
-  // React-safe setter so the page’s listeners catch the value change
+  // Make frameworks notice value changes
   const setInputValue = (input, value) => {
-    const last = input.value;
-    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')?.set;
+    const proto = Object.getPrototypeOf(input);
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
     if (setter) setter.call(input, String(value));
     else input.value = String(value);
-    if (last !== String(value)) {
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-    }
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
   };
 
-  // Try to read wallet money from the header (works on standard & most themes)
   const readWallet = () => {
-    const roots = [document.querySelector('#topRoot') || document.body];
-    for (const root of roots) {
-      // Look for $-formatted amounts that are likely the wallet
-      const nodes = Array.from(root.querySelectorAll('span, div, a, li, b, strong'))
-        .filter((n) => /\$\s?[\d,. ]+/.test(n.textContent || ''));
-      for (const n of nodes) {
-        const val = parseMoney(n.textContent);
-        if (Number.isFinite(val)) {
-          // Heuristic: wallet is often displayed in a small cluster; prefer largest repeated value
-          return val;
-        }
-      }
+    const root = document.querySelector('#topRoot') || document.body;
+    const nodes = Array.from(root.querySelectorAll('span, div, a, li, b, strong'))
+      .filter((n) => /\$\s?[\d,. ]+/.test(n.textContent || ''));
+    for (const n of nodes) {
+      const val = parseMoney(n.textContent);
+      if (Number.isFinite(val) && val >= 0) return val;
     }
     return NaN;
   };
 
-  // Locate visible listing rows in the list view popup/panel
-  const findListingRows = () => {
-    // Panel containers Torn commonly uses around list view
-    const panel = document.querySelector(
-      '.item-list-wrap, .list-wrap, .market-list-wrap, .items-list, .market-wrapper, .content, #content'
-    ) || document.body;
+  const isMarketPage = () => /page\.php\?sid=ItemMarket/i.test(location.href);
 
-    // A “row” should contain: a Buy button, an amount input, and show a price text
-    const buyButtons = Array.from(panel.querySelectorAll('button, a')).filter((b) =>
-      /buy/i.test(b.textContent || '')
-    );
-
-    const rows = new Set();
-    for (const b of buyButtons) {
-      const row = b.closest('tr, .row, .table-row, .market-row, li, .list-item, .item-row, .items-list .item');
-      if (row && row.offsetParent !== null) rows.add(row);
-    }
-    return Array.from(rows);
+  const isAmountInput = (el) => {
+    if (!(el instanceof HTMLInputElement)) return false;
+    if (el.type === 'number') return true;
+    const idn = (el.id || '').toLowerCase();
+    const name = (el.name || '').toLowerCase();
+    return /amount|qty|quantity/.test(idn) || /amount|qty|quantity/.test(name);
   };
 
-  // For a row, try to extract unit price, available qty (if visible), and the qty input element
+  // Try to locate the listing row for a given amount input
+  const findRow = (el) => {
+    return el.closest('tr, .row, .table-row, .market-row, li, .list-item, .item-row, .items-list .item');
+  };
+
+  // Extract unit price (lowest $ in the row) and available qty if visible
   const extractRowData = (row) => {
-    // 1) pick the lowest-looking $ value inside the row as the unit price
+    // price
     const priceNodes = Array.from(row.querySelectorAll('span, div, td, b, strong, a'))
       .filter((n) => /\$\s?[\d,. ]+/.test(n.textContent || ''));
     let unitPrice = NaN;
@@ -91,25 +75,17 @@
         .map((n) => parseMoney(n.textContent))
         .filter((v) => Number.isFinite(v) && v > 0)
         .sort((a, b) => a - b);
-      if (prices.length) unitPrice = prices[0]; // cheapest number in the row is usually the per-unit price
+      if (prices.length) unitPrice = prices[0];
     }
 
-    // 2) find the input next to the Buy button (or any number input in row)
-    let amountInput =
-      row.querySelector('input[type="number"]') ||
-      Array.from(row.querySelectorAll('input')).find((i) =>
-        /(amount|qty|quantity)/i.test(i.name || i.id || '')
-      );
-
-    // 3) try to detect listing qty (optional; Infinity if unknown)
+    // qty (optional)
     let listingQty = Infinity;
-    const qtyHints = Array.from(row.querySelectorAll('span, div, td, b, strong'))
-      .map((n) => n.textContent || '')
-      .map((t) => t.trim());
-    // Common patterns: "x123", "Qty: 123", "Quantity 123", "(123 left)"
-    for (const t of qtyHints) {
+    const texts = Array.from(row.querySelectorAll('span, div, td, b, strong')).map(
+      (n) => (n.textContent || '').trim()
+    );
+    for (const t of texts) {
       if (/^\s*x?\s*\d[\d,]*\s*$/i.test(t)) {
-        const v = textToInt(t);
+        const v = toInt(t);
         if (Number.isFinite(v) && v > 0) {
           listingQty = v;
           break;
@@ -117,7 +93,7 @@
       }
       const m = t.match(/(qty|quantity|left)\s*[:\-]?\s*(\d[\d,]*)/i);
       if (m) {
-        const v = textToInt(m[2]);
+        const v = toInt(m[2]);
         if (Number.isFinite(v) && v > 0) {
           listingQty = v;
           break;
@@ -125,7 +101,7 @@
       }
       const m2 = t.match(/\((\d[\d,]*)\s*left\)/i);
       if (m2) {
-        const v = textToInt(m2[1]);
+        const v = toInt(m2[1]);
         if (Number.isFinite(v) && v > 0) {
           listingQty = v;
           break;
@@ -133,92 +109,67 @@
       }
     }
 
-    if (!Number.isFinite(unitPrice) || !amountInput) return null;
-    return { row, unitPrice, listingQty, amountInput };
+    return { unitPrice, listingQty };
   };
 
-  const pickCheapestRow = (rows) => {
-    const data = rows.map(extractRowData).filter(Boolean);
-    if (!data.length) return null;
-    data.sort((a, b) => a.unitPrice - b.unitPrice);
-    return data[0];
-  };
-
-  // Core action: compute and prefill
-  const prefill = () => {
-    const wallet = readWallet();
-    if (!Number.isFinite(wallet) || wallet <= 0) return;
-
-    const rows = findListingRows();
-    if (!rows.length) return;
-
-    const cheapest = pickCheapestRow(rows);
-    if (!cheapest) return;
-
-    const { unitPrice, listingQty, amountInput } = cheapest;
-    if (!Number.isFinite(unitPrice) || unitPrice <= 0) return;
-
+  const computeFill = (wallet, unitPrice, listingQty) => {
+    if (!Number.isFinite(wallet) || !Number.isFinite(unitPrice) || unitPrice <= 0) return null;
     const maxAffordable = Math.floor(wallet / unitPrice);
-    if (!Number.isFinite(maxAffordable) || maxAffordable <= 0) {
-      // Can't afford one—clear the input politely
-      setInputValue(amountInput, '');
-      amountInput.placeholder = 'Insufficient funds';
-      return;
-    }
-
-    const fill = Math.max(1, Math.min(maxAffordable, listingQty));
-    setInputValue(amountInput, fill);
-
-    // Optional: brief highlight to show it worked
-    flash(amountInput);
+    if (!Number.isFinite(maxAffordable) || maxAffordable <= 0) return 0;
+    return Math.max(1, Math.min(maxAffordable, Number.isFinite(listingQty) ? listingQty : Infinity));
   };
 
   const flash = (el) => {
-    el.style.transition = 'box-shadow 0.35s ease';
-    el.style.boxShadow = '0 0 0 3px rgba(0,200,120,0.6)';
-    setTimeout(() => (el.style.boxShadow = '0 0 0 0 rgba(0,0,0,0)'), 400);
+    el.style.transition = 'box-shadow 0.25s ease';
+    el.style.boxShadow = '0 0 0 3px rgba(0,160,255,0.55)';
+    setTimeout(() => (el.style.boxShadow = '0 0 0 0 rgba(0,0,0,0)'), 300);
   };
 
-  // Mutation observer to catch list view openings/updates
-  const startObserver = () => {
-    let ticking = false;
-    const schedule = () => {
-      if (ticking) return;
-      ticking = true;
-      requestAnimationFrame(() => {
-        ticking = false;
-        // slight delay lets Torn render row contents completely
-        setTimeout(prefill, 60);
-      });
-    };
+  // ---------- main: delegate on focus/click ----------
+  const handleAttemptPrefill = (input) => {
+    if (!isMarketPage() || !isAmountInput(input)) return;
 
-    const mo = new MutationObserver((muts) => {
-      // If nodes added that look like rows or inputs, schedule a pass
-      for (const m of muts) {
-        if (m.addedNodes && m.addedNodes.length) {
-          for (const n of m.addedNodes) {
-            if (!(n instanceof HTMLElement)) continue;
-            if (
-              n.querySelector?.('button, a, input[type="number"], .row, tr, .list-item, .item-row') ||
-              /item|market|list/i.test(n.className || '')
-            ) {
-              schedule();
-              break;
-            }
-          }
-        }
-      }
-    });
+    const wallet = readWallet();
+    if (!Number.isFinite(wallet) || wallet <= 0) return;
 
-    mo.observe(document.documentElement, { subtree: true, childList: true });
-    // Initial runs
-    setTimeout(prefill, 300);
-    setTimeout(prefill, 1200);
-    // Gentle periodic refresh for dynamic lists
-    setInterval(prefill, 3000);
+    const row = findRow(input);
+    if (!row) return;
+
+    const { unitPrice, listingQty } = extractRowData(row);
+    const fill = computeFill(wallet, unitPrice, listingQty);
+
+    if (fill === null) return;           // couldn't compute
+    if (fill === 0) {                    // can't afford 1
+      input.placeholder = 'Insufficient funds';
+      return;
+    }
+
+    setInputValue(input, fill);
+    flash(input);
   };
 
-  if (/page\.php\?sid=ItemMarket/i.test(location.href)) {
-    startObserver();
-  }
+  // Focusin catches keyboard/tab focus; pointerdown catches taps before focus on mobile
+  document.addEventListener('focusin', (e) => {
+    const target = e.target;
+    if (isAmountInput(target)) handleAttemptPrefill(target);
+  });
+
+  document.addEventListener('pointerdown', (e) => {
+    const target = e.target;
+    if (isAmountInput(target)) {
+      // slight delay so DOM is fully present (if just opened)
+      setTimeout(() => handleAttemptPrefill(target), 40);
+    }
+  });
+
+  // Also try when panels mutate (e.g., switching item opens a fresh list)
+  const mo = new MutationObserver(() => {
+    // no automatic fills here — we only attach listeners;
+    // but we’ll opportunistically prefill the currently focused amount box
+    const active = document.activeElement;
+    if (isAmountInput(active)) {
+      setTimeout(() => handleAttemptPrefill(active), 60);
+    }
+  });
+  mo.observe(document.documentElement, { childList: true, subtree: true });
 })();
