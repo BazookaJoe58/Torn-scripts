@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Item Market — Half-Overlay Fill Max on native Buy
+// @name         Torn Item Market — Quarter-Overlay Fill Max on native Buy
 // @namespace    https://torn.city/
-// @version      2.3.3
-// @description  Places a Fill Max overlay over HALF of Torn's native Buy/Confirm. Click once to fill max; overlay then drops behind (no pointer events) so the real Buy is clickable. No bypasses.
+// @version      2.3.4
+// @description  Places a Fill Max overlay over the rightmost 25% of Torn's native Buy/Confirm button. Click once to fill max; overlay then drops behind so native Buy works normally.
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
 // @grant        GM_addStyle
@@ -14,20 +14,19 @@
 (function () {
   'use strict';
 
-  // ---------- Styles ----------
   GM_addStyle(`
     .im-fill-overlay {
       position: absolute;
-      top: 0; left: 0;
-      height: 100%; width: 50%;
+      top: 0; right: 0;
+      height: 100%; width: 25%;
       display: flex; align-items: center; justify-content: center;
-      border-radius: 8px 0 0 8px;
-      cursor: pointer; font-size: 12px; font-weight: 600;
+      border-radius: 0 8px 8px 0;
+      cursor: pointer; font-size: 11px; font-weight: 600;
       z-index: 9;
       background: rgba(22, 163, 74, 0.12);
       color: #16a34a;
       border: 1px solid #16a34a;
-      border-right: none;
+      border-left: none;
       backdrop-filter: blur(1px);
       pointer-events: auto;
       user-select: none;
@@ -39,7 +38,6 @@
     .im-flash { box-shadow: 0 0 0 3px rgba(0,160,255,.55) !important; transition: box-shadow .25s ease; }
   `);
 
-  // ---------- Selectors ----------
   const SEL = {
     list: 'ul[class*="sellerList"]',
     rowWrapper: 'li[class*="rowWrapper"]',
@@ -51,7 +49,6 @@
     buyButtons: 'button, a',
   };
 
-  // ---------- Utils ----------
   const parseMoney = (s)=>{ s=String(s||'').replace(/[^\d.]/g,''); return s?Math.floor(Number(s)):NaN; };
   const toInt = (s)=>{ const m=String(s||'').match(/\d[\d,]*/); return m?Number(m[0].replace(/[^\d]/g,'')):NaN; };
   const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
@@ -86,18 +83,7 @@
       if (inp.type==='checkbox'||inp.type==='hidden'||inp.disabled) return false;
       const r=inp.getBoundingClientRect(); return r.width>0 && r.height>0;
     });
-    if (!candidates.length) return null;
-    const toggle=row.querySelector(SEL.showBtn);
-    return candidates.sort((a,b)=>{
-      const an=a.type==='number'?0:1, bn=b.type==='number'?0:1;
-      if (an!==bn) return an-bn;
-      if (toggle){
-        const tr=toggle.getBoundingClientRect(), cx=tr.left+tr.width/2, cy=tr.top+tr.height/2;
-        const d=(x)=>{const r=x.getBoundingClientRect(); return Math.hypot(cx-(r.left+r.width/2), cy-(r.top+r.height/2));};
-        return d(a)-d(b);
-      }
-      return 0;
-    })[0];
+    return candidates[0]||null;
   }
 
   function findNativeBuyButton(row){
@@ -108,19 +94,16 @@
       if (/show\s*buy/i.test(txt)) return false;
       return /buy|confirm|purchase/.test(txt);
     });
-    const visible=btns.filter(b=>b.getBoundingClientRect().width>0 && b.getBoundingClientRect().height>0);
-    return visible[0] || btns[0] || null;
+    return btns.find(b=>b.getBoundingClientRect().width>0 && b.getBoundingClientRect().height>0) || null;
   }
 
   async function ensureControlsOpen(row){
     const show=row.querySelector(SEL.showBtn);
     if (show) show.click();
-    for (let i=0;i<20;i++){ await sleep(20); if (findAmountInputForRow(row)) break; } // ~400ms
+    for (let i=0;i<20;i++){ await sleep(20); if (findAmountInputForRow(row)) break; }
   }
 
-  // ---------- Core: half overlay on native Buy ----------
-  async function placeHalfOverlayOnBuy(row){
-    // wait for native Buy to mount
+  async function placeOverlay(row){
     let native=null;
     const start=performance.now();
     while (!native && performance.now()-start<3000){
@@ -129,44 +112,32 @@
     }
     if (!native) return;
 
-    // use the native's parent as positioning context
     const container = native.parentElement || row;
-    const cs = getComputedStyle(container);
-    if (cs.position === 'static') container.style.position = 'relative';
-
-    // avoid duplicates
+    if (getComputedStyle(container).position === 'static') container.style.position='relative';
     if (container.querySelector(':scope > .im-fill-overlay')) return;
 
-    // create overlay covering the LEFT half
-    const overlay = document.createElement('button');
+    const overlay=document.createElement('button');
     overlay.type='button';
     overlay.className='im-fill-overlay';
     overlay.textContent='Fill Max';
     container.appendChild(overlay);
 
     overlay.addEventListener('click', async ()=>{
-      // compute and fill
-      const unitPrice = parseMoney(row.querySelector(SEL.price)?.textContent);
-      const qtyText = row.querySelector(SEL.qtyCell)?.textContent;
-      const qty = toInt(qtyText);
-      const wallet = getWalletFromHeader();
-      const afford = computeAfford(wallet, unitPrice, qty);
+      const unitPrice=parseMoney(row.querySelector(SEL.price)?.textContent);
+      const qtyText=row.querySelector(SEL.qtyCell)?.textContent;
+      const qty=toInt(qtyText);
+      const wallet=getWalletFromHeader();
+      const afford=computeAfford(wallet,unitPrice,qty);
 
       await ensureControlsOpen(row);
-
-      let input=null, t0=performance.now();
-      while (!input && performance.now()-t0<3000){
-        await sleep(40);
-        input=findAmountInputForRow(row);
-      }
-      if (!input){ alert('Could not find amount input for this listing.'); return; }
+      let input=findAmountInputForRow(row);
+      if (!input){ alert('No input found.'); return; }
 
       setInputValue(input, afford>0?afford:'');
       if (afford<=0) input.placeholder='Insufficient funds';
       input.scrollIntoView({block:'center', inline:'nearest'});
       flash(input); input.focus();
 
-      // drop behind and let the native Buy be clickable
       overlay.classList.add('im-done');
       native.focus();
     });
@@ -178,7 +149,7 @@
   }
 
   async function refresh(){
-    for (const row of getRows()) placeHalfOverlayOnBuy(row);
+    for (const row of getRows()) placeOverlay(row);
   }
 
   const mo=new MutationObserver(()=>{ if (mo._raf) cancelAnimationFrame(mo._raf); mo._raf=requestAnimationFrame(()=>setTimeout(refresh,30)); });
