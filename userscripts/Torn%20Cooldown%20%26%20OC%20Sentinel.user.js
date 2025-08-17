@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Cooldown & OC Sentinel
 // @namespace    http://tampermonkey.net/
-// @version      1.3.4
+// @version      1.3.5
 // @description  Semi-transparent full-screen flash + modal acknowledge for: Drug (0), Booster (≤20h), Education finish, OC finished / Not in OC. PDA-friendly, draggable, minimisable. Single API key (Limited recommended). Overlay is click-through; modal captures clicks. Author: BazookaJoe.
 // @author       BazookaJoe
 // @match        https://www.torn.com/*
@@ -37,6 +37,7 @@
     last: 'tcos_last_v5',
     ends: 'tcos_ends_v5',
     pos: 'tcos_panel_pos_v1',
+    pillPos: 'tcos_pill_pos_v1',     // NEW: draggable pill position
     minimized: 'tcos_panel_min_v1',
   };
 
@@ -128,7 +129,7 @@
     #tcos-tests-menu{position:absolute;right:0;bottom:34px;display:none;min-width:180px;background:rgba(20,20,20,0.98);border:1px solid #444;border-radius:10px;padding:6px;z-index:2147483648;}
     #tcos-tests-menu button{width:100%;text-align:left;margin:2px 0;}
 
-    /* Mini-tab moved to RIGHT edge, to sit under Shoplift Sentinel */
+    /* Mini-tab on RIGHT edge */
     #tcos-minitab{
       position:fixed;
       right:0;
@@ -151,7 +152,7 @@
       user-select:none;
     }
 
-    /* Pill sits directly under the mini-tab */
+    /* Pill defaults to docked under the mini-tab; can be dragged anywhere */
     .tcos-pill{
       position:fixed;
       right:0;
@@ -165,7 +166,9 @@
       border:1px solid #444;
       font-family:monospace;
       font-size:12px;
-      z-index:2147483644
+      z-index:2147483644;
+      cursor:move; /* NEW: show it's draggable */
+      user-select:none;
     }
     .tcos-pill div{display:flex;justify-content:space-between;gap:8px;}
 
@@ -303,17 +306,21 @@
     if (!masterToggle.dataset.bound) {
       masterToggle.addEventListener('change', () => {
         if (!masterToggle.checked) stopFlash();
-        // pill visibility follows minimised state
         pill.style.display = masterToggle.checked ? 'block' : 'none';
       });
       masterToggle.dataset.bound = '1';
     }
 
     // Draggable header binding (idempotent)
-    makeDraggable();
+    makePanelDraggable();
+    // NEW: Draggable pill binding (idempotent)
+    makePillDraggable();
 
     // Keep pill visible when enabled
     if (masterToggle.checked) pill.style.display = 'block';
+
+    // Restore saved pill position if available
+    restorePillPosition();
   }
 
   function bindOnce(id, evt, fn) {
@@ -334,6 +341,7 @@
     last = await GM_getValue(STORAGE.last, {});
     ends = await GM_getValue(STORAGE.ends, ends);
     const pos = await GM_getValue(STORAGE.pos, null);
+    const pillPos = await GM_getValue(STORAGE.pillPos, null);
     const min = await GM_getValue(STORAGE.minimized, false);
 
     keyInput.value = API_KEY || '';
@@ -348,6 +356,14 @@
       panel.style.bottom = 'auto';
       panel.style.right = 'auto';
     }
+    if (pillPos && typeof pillPos.x === 'number' && typeof pillPos.y === 'number') {
+      // Apply saved pill position
+      pill.style.left = `${pillPos.x}px`;
+      pill.style.top = `${pillPos.y}px`;
+      pill.style.right = 'auto';
+      pill.style.transform = 'translateY(0)'; // when manually positioned, no translate
+    }
+
     setMinimised(min);
   }
   async function persist() {
@@ -575,7 +591,7 @@
   // =========================
   // Draggable + Minimise
   // =========================
-  function makeDraggable() {
+  function makePanelDraggable() {
     const head = qs('tcos-head');
     if (!head || head.dataset.bound) return;
     let dragging = false, startX = 0, startY = 0;
@@ -610,6 +626,69 @@
     window.addEventListener('touchmove', onMove, { passive:false });
     window.addEventListener('touchend', onUp);
     head.dataset.bound = '1';
+  }
+
+  // NEW: make the pill draggable & persist its position
+  function makePillDraggable() {
+    if (!pill || pill.dataset.bound) return;
+
+    let dragging = false, offsetX = 0, offsetY = 0;
+
+    function onDown(e) {
+      dragging = true;
+      const rect = pill.getBoundingClientRect();
+      const cx = e.touches ? e.touches[0].clientX : e.clientX;
+      const cy = e.touches ? e.touches[0].clientY : e.clientY;
+      offsetX = cx - rect.left;
+      offsetY = cy - rect.top;
+
+      // When user starts dragging, switch to left/top positioning
+      pill.style.right = 'auto';
+      pill.style.transform = 'translateY(0)';
+      e.preventDefault();
+    }
+
+    function onMove(e) {
+      if (!dragging) return;
+      const cx = e.touches ? e.touches[0].clientX : e.clientX;
+      const cy = e.touches ? e.touches[0].clientY : e.clientY;
+
+      const x = Math.max(4, Math.min(window.innerWidth - pill.offsetWidth - 4, cx - offsetX));
+      const y = Math.max(4, Math.min(window.innerHeight - pill.offsetHeight - 4, cy - offsetY));
+
+      pill.style.left = `${x}px`;
+      pill.style.top  = `${y}px`;
+    }
+
+    async function onUp() {
+      if (!dragging) return;
+      dragging = false;
+      const x = parseInt(pill.style.left || '0', 10);
+      const y = parseInt(pill.style.top  || '0', 10);
+      await GM_setValue(STORAGE.pillPos, { x, y });
+    }
+
+    pill.addEventListener('mousedown', onDown);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    pill.addEventListener('touchstart', onDown, { passive:false });
+    window.addEventListener('touchmove', onMove, { passive:false });
+    window.addEventListener('touchend', onUp);
+
+    pill.dataset.bound = '1';
+  }
+
+  function restorePillPosition() {
+    // If a saved position exists, loadPersisted already applied it.
+    // If not, ensure it's docked under the right mini-tab by default.
+    GM_getValue(STORAGE.pillPos, null).then((pillPos) => {
+      if (!pillPos) {
+        pill.style.left = ''; // use CSS right/top default docking
+        pill.style.top = '';
+        pill.style.right = '0';
+        pill.style.transform = 'translateY(-50%)';
+      }
+    });
   }
 
   function setMinimised(min) {
@@ -674,12 +753,13 @@
     const mo = new MutationObserver(() => {
       if (!qs('tcos-panel') || !qs('tcos-minitab') || !document.querySelector('.tcos-pill') || !qs('tcos-overlay') || !qs('tcos-modal-wrap')) {
         ensureUI();
+        makePillDraggable(); // rebind pill drag if recreated
       }
     });
     mo.observe(document.documentElement, { childList: true, subtree: true });
 
     // Periodic belt-and-braces reattach
-    setInterval(ensureUI, REATTACH_MS);
+    setInterval(() => { ensureUI(); makePillDraggable(); }, REATTACH_MS);
   }
 
   // Kickoff when document is ready enough
