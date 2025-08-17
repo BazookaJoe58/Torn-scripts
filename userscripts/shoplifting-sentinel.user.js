@@ -35,10 +35,8 @@
   };
 
   function loadJSON(key, fallback) {
-    try {
-      const v = GM_getValue(key);
-      return v ? JSON.parse(v) : fallback;
-    } catch { return fallback; }
+    try { const v = GM_getValue(key); return v ? JSON.parse(v) : fallback; }
+    catch { return fallback; }
   }
   function saveJSON(key, obj) { GM_setValue(key, JSON.stringify(obj)); }
 
@@ -77,15 +75,27 @@
   .tgl { display:flex; align-items:center; gap:4px; font-size:12px; white-space:nowrap; }
   .tgl input{ accent-color:#06c; }
 
-  /* Full-screen flashing overlay */
-  #tsentinel-flash {
-    position: fixed; inset: 0; background: rgba(255,0,0,.7);
-    z-index: 2147483647; pointer-events: none; opacity: 0;
-    animation: tsentinel-pulse 1s ease-in-out 0s 6 alternate;
+  /* Full-screen flashing overlay (persistent until Acknowledge) */
+  #tsentinel-overlay {
+    position: fixed; inset: 0; z-index: 2147483647; display: none;
+    background: rgba(255,0,0,.75);
+    animation: tsentinel-pulse 1s ease-in-out infinite;
   }
-  @keyframes tsentinel-pulse {
-    from { opacity: 0; } to { opacity: 1; }
+  @keyframes tsentinel-pulse { from { opacity: .35; } to { opacity: 1; } }
+
+  #tsentinel-overlay-inner {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    background: rgba(0,0,0,.75); color: #fff; padding: 18px 16px; border-radius: 12px;
+    min-width: 260px; max-width: 90vw; text-align: center; box-shadow: 0 10px 40px rgba(0,0,0,.35);
+    border: 1px solid rgba(255,255,255,.15);
   }
+  #tsentinel-overlay-title { font-size: 16px; font-weight: 800; margin-bottom: 6px; }
+  #tsentinel-overlay-reason { font-size: 14px; margin-bottom: 12px; line-height: 1.35; }
+  #tsentinel-ack {
+    border: 0; background: #ffd400; color: #000; font-weight: 800; border-radius: 999px;
+    padding: 8px 16px; cursor: pointer; font-size: 14px;
+  }
+  #tsentinel-ack:hover { filter: brightness(0.95); }
 
   /* Header tiny toggle button injected into Torn status bar (optional) */
   #tsentinel-icon { width: 18px; height: 18px; cursor:pointer; opacity:.75; border-radius:4px; background:#eaeaea; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; }
@@ -98,6 +108,36 @@
     if (!CFG.storeConfig[storeKey]) {
       CFG.storeConfig[storeKey] = { both: false, camera: false, guards: false };
     }
+  }
+
+  // ------------------------ Overlay (persistent until Acknowledge) ------------------------
+  function ensureOverlay() {
+    let ov = document.getElementById('tsentinel-overlay');
+    if (ov) return ov;
+
+    ov = document.createElement('div');
+    ov.id = 'tsentinel-overlay';
+    ov.innerHTML = `
+      <div id="tsentinel-overlay-inner">
+        <div id="tsentinel-overlay-title">Shoplifting Alert</div>
+        <div id="tsentinel-overlay-reason">Security down</div>
+        <button id="tsentinel-ack" type="button">Acknowledge</button>
+      </div>
+    `;
+    document.documentElement.appendChild(ov);
+    ov.querySelector('#tsentinel-ack').addEventListener('click', () => {
+      ov.style.display = 'none';
+    });
+    return ov;
+  }
+
+  function flashFullScreen(reason) {
+    // desktop notification too
+    try { if (typeof GM_notification === 'function') GM_notification({ title: 'Shoplifting Sentinel', text: reason || 'Alert', timeout: 4000 }); } catch {}
+    const ov = ensureOverlay();
+    ov.style.display = 'block';
+    const reasonEl = ov.querySelector('#tsentinel-overlay-reason');
+    if (reasonEl) reasonEl.textContent = reason || 'Security down';
   }
 
   // ------------------------ UI Build ------------------------
@@ -117,9 +157,7 @@
       <div id="tsentinel-header">
         <div id="tsentinel-title">Shoplifting Sentinel</div>
         <div id="tsentinel-controls">
-          <label class="tswitch" title="Enable/Disable polling">
-            <input type="checkbox" id="tsentinel-enabled"><span>On</span>
-          </label>
+          <label class="tswitch" title="Enable/Disable polling"><input type="checkbox" id="tsentinel-enabled"><span>On</span></label>
           <div id="tsentinel-icon" title="Hide/Show Panel">S</div>
         </div>
       </div>
@@ -149,20 +187,9 @@
     (function makeDraggable() {
       const header = wrap.querySelector('#tsentinel-header');
       let sx=0, sy=0, ox=0, oy=0, dragging=false;
-      header.addEventListener('mousedown', e => {
-        dragging = true; sx = e.clientX; sy = e.clientY;
-        ox = wrap.offsetLeft; oy = wrap.offsetTop; e.preventDefault();
-      });
-      window.addEventListener('mousemove', e => {
-        if (!dragging) return;
-        const dx = e.clientX - sx, dy = e.clientY - sy;
-        wrap.style.left = (ox + dx) + 'px';
-        wrap.style.top = (oy + dy) + 'px';
-      });
-      window.addEventListener('mouseup', () => {
-        if (dragging) saveJSON(SKEY.pos, { x: wrap.offsetLeft, y: wrap.offsetTop });
-        dragging = false;
-      });
+      header.addEventListener('mousedown', e => { dragging = true; sx = e.clientX; sy = e.clientY; ox = wrap.offsetLeft; oy = wrap.offsetTop; e.preventDefault(); });
+      window.addEventListener('mousemove', e => { if (!dragging) return; const dx = e.clientX - sx, dy = e.clientY - sy; wrap.style.left = (ox + dx) + 'px'; wrap.style.top = (oy + dy) + 'px'; });
+      window.addEventListener('mouseup', () => { if (dragging) saveJSON(SKEY.pos, { x: wrap.offsetLeft, y: wrap.offsetTop }); dragging = false; });
     })();
 
     // Wire controls
@@ -202,36 +229,17 @@
     });
 
     $refresh.addEventListener('click', () => pingNow(true, $stores));
-    $test.addEventListener('click', () => flashFullScreen('TEST'));
+    $test.addEventListener('click', () => {
+      ensureOverlay();
+      flashFullScreen('TEST — manual check');
+    });
 
-    // If we have cached shops from a previous fetch, render them immediately so you see toggles
+    // Render cached shops immediately (if any)
     const cached = loadJSON(SKEY.lastShops, null);
     if (cached && Array.isArray(cached)) renderStores(cached, $stores);
 
     // auto-start polling if enabled
     if (CFG.enabled) startPolling();
-  }
-
-  // ------------------------ Flash overlay (fixed) ------------------------
-  function flashFullScreen(reason) {
-    try {
-      if (typeof GM_notification === 'function') {
-        GM_notification({ title: 'Shoplifting Sentinel', text: reason || 'Alert', timeout: 3500 });
-      }
-    } catch {}
-    const old = document.getElementById('tsentinel-flash');
-    if (old) old.remove();
-    const el = document.createElement('div');
-    el.id = 'tsentinel-flash';
-    document.documentElement.appendChild(el);
-    // as a fallback, in case animation is blocked, toggle visibility quickly
-    let blinks = 0;
-    const iv = setInterval(() => {
-      el.style.opacity = (el.style.opacity === '1' ? '0' : '1');
-      if (++blinks > 12) { clearInterval(iv); el.remove(); }
-    }, 500);
-    // Remove after main animation as well
-    setTimeout(() => { try { el.remove(); } catch {} }, 7000);
   }
 
   // ------------------------ Rendering ------------------------
@@ -357,19 +365,20 @@
             CFG.lastFired[key] = now;
             saveJSON(SKEY.cfg, CFG);
 
-            const reason = cfg.both
-              ? `${nicify(key)} — BOTH securities down`
-              : `${nicify(key)} — ${[
-                  cfg.camera && camDown ? 'Camera' : null,
-                  cfg.guards && grdDown ? 'Guards' : null,
-                ].filter(Boolean).join(' & ')} down`;
+            const parts = [];
+            if (cfg.both) parts.push('Both securities');
+            else {
+              if (cfg.camera && camDown) parts.push('Camera');
+              if (cfg.guards && grdDown) parts.push('Guards');
+            }
+            const which = parts.join(' & ') || 'Security';
+            const reason = `${nicify(key)} — ${which} down`;
 
             flashFullScreen(reason);
           }
         }
       });
     } catch (e) {
-      // Gentle hint for API key issues
       if (String(e.message || e).toLowerCase().includes('api key')) {
         const $api = document.getElementById('tsentinel-apikey');
         if ($api) { $api.style.outline = '2px solid #e33'; setTimeout(() => ($api.style.outline = ''), 1500); }
@@ -378,20 +387,16 @@
     } finally { busy = false; }
   }
 
-  // ------------------------ Bootstrap (fix: always mount UI) ------------------------
+  // ------------------------ Bootstrap ------------------------
   function ready(fn) {
     if (document.readyState === 'complete' || document.readyState === 'interactive') return fn();
     document.addEventListener('DOMContentLoaded', fn, { once: true });
   }
   ready(() => {
-    // In case Torn swaps content SPA-style, also ensure body exists
-    const tryMount = () => {
-      if (!document.body) return void setTimeout(tryMount, 200);
-      buildPanel();
-    };
+    const tryMount = () => { if (!document.body) return void setTimeout(tryMount, 200); buildPanel(); };
     tryMount();
 
-    // Optional: put a tiny "S" button into the Torn status bar for quick toggle
+    // Tiny "S" button in status bar for quick toggle
     const injectStatusIcon = () => {
       const bar = document.querySelector('ul[class*=status-icons]');
       if (!bar) return setTimeout(injectStatusIcon, 1000);
