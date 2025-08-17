@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Cooldown & OC Sentinel
 // @namespace    http://tampermonkey.net/
-// @version      1.2.0
-// @description  Semi-transparent full-screen flash + modal acknowledge for: Drug (0), Booster (<=20h), Education finish, Bank finish, OC finished / Not in OC. PDA-friendly, draggable, minimisable. Uses Public API key for cooldowns; Optional Limited API key for exact OC (and Edu/Bank if available). Overlay is click-through; modal captures clicks. Author: BazookaJoe.
+// @version      1.3.0
+// @description  Semi-transparent full-screen flash + modal acknowledge for: Drug (0), Booster (<=20h), Education finish, Bank finish, OC finished / Not in OC. PDA-friendly, draggable, minimisable. Single API key (Limited recommended). Overlay is click-through; modal captures clicks. Author: BazookaJoe.
 // @author       BazookaJoe
 // @match        https://www.torn.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
@@ -30,12 +30,11 @@
   const NOT_IN_OC_COOLDOWN_MS = 30 * 60_000; // min gap between "not in OC" alerts
 
   const STORAGE = {
-    pubKey: 'tcos_public_key_v1',
-    limKey: 'tcos_limited_key_v1',
-    toggles: 'tcos_toggles_v2',
-    snooze: 'tcos_snooze_v2',
-    last: 'tcos_last_v2',
-    ends: 'tcos_ends_v2',
+    key: 'tcos_api_key_v3',          // single API key (Limited recommended)
+    toggles: 'tcos_toggles_v3',
+    snooze: 'tcos_snooze_v3',
+    last: 'tcos_last_v3',
+    ends: 'tcos_ends_v3',
     pos: 'tcos_panel_pos_v1',
     minimized: 'tcos_panel_min_v1',
   };
@@ -52,19 +51,11 @@
   // =========================
   // State
   // =========================
-  let PUBLIC_KEY = '';
-  let LIMITED_KEY = '';
+  let API_KEY = '';
   let toggles = {};
   let snoozeUntil = {};
   let last = {};
-  let ends = {
-    // epoch ms for end times; we render locally from these
-    drug: 0,
-    booster: 0,
-    edu: 0,
-    bank: 0,
-    oc: 0,
-  };
+  let ends = { drug:0, booster:0, edu:0, bank:0, oc:0 };
 
   let flashTimer = null;
   let flashOn = false;
@@ -176,12 +167,8 @@
       <label class="full"><input type="checkbox" id="tcos-oc"> OC finished / Not in OC</label>
 
       <div class="full">
-        <label for="tcos-key-public" style="display:block;margin-bottom:4px;">Public API Key (for cooldowns)</label>
-        <input id="tcos-key-public" type="text" placeholder="Public API key">
-      </div>
-      <div class="full">
-        <label for="tcos-key-limited" style="display:block;margin-bottom:4px;">Limited API Key (optional: OC/Edu/Bank)</label>
-        <input id="tcos-key-limited" type="text" placeholder="Limited API key (if you have one)">
+        <label for="tcos-key" style="display:block;margin-bottom:4px;">API Key (Limited recommended)</label>
+        <input id="tcos-key" type="text" placeholder="Paste your API key">
       </div>
     </div>
     <div id="tcos-foot">
@@ -221,8 +208,7 @@
   // Shortcuts
   const qs = (id) => document.getElementById(id);
   const masterToggle = qs('tcos-toggle');
-  const pubInput = qs('tcos-key-public');
-  const limInput = qs('tcos-key-limited');
+  const keyInput = qs('tcos-key');
   const drugToggle = qs('tcos-drug');
   const boosterToggle = qs('tcos-booster');
   const eduToggle = qs('tcos-edu');
@@ -233,8 +219,7 @@
   // Persist
   // =========================
   async function loadPersisted() {
-    PUBLIC_KEY = await GM_getValue(STORAGE.pubKey, '');
-    LIMITED_KEY = await GM_getValue(STORAGE.limKey, '');
+    API_KEY = await GM_getValue(STORAGE.key, '');
     toggles = await GM_getValue(STORAGE.toggles, { ...DEFAULT_TOGGLES });
     snoozeUntil = await GM_getValue(STORAGE.snooze, {});
     last = await GM_getValue(STORAGE.last, {});
@@ -242,8 +227,7 @@
     const pos = await GM_getValue(STORAGE.pos, null);
     const min = await GM_getValue(STORAGE.minimized, false);
 
-    pubInput.value = PUBLIC_KEY || '';
-    limInput.value = LIMITED_KEY || '';
+    keyInput.value = API_KEY || '';
     drugToggle.checked = !!toggles.drug;
     boosterToggle.checked = !!toggles.booster;
     eduToggle.checked = !!toggles.edu;
@@ -259,8 +243,7 @@
     setMinimised(min);
   }
   async function persist() {
-    await GM_setValue(STORAGE.pubKey, PUBLIC_KEY);
-    await GM_setValue(STORAGE.limKey, LIMITED_KEY);
+    await GM_setValue(STORAGE.key, API_KEY);
     await GM_setValue(STORAGE.toggles, toggles);
     await GM_setValue(STORAGE.snooze, snoozeUntil);
     await GM_setValue(STORAGE.last, last);
@@ -328,17 +311,14 @@
 
   // =========================
   // Server refresh (sets end-times)
-  // Cooldowns via PUBLIC (matches your drug script) — client countdowns render from end-times. :contentReference[oaicite:2]{index=2}
-  // OC via LIMITED (matches your OC v2 script) — exact ready_at; fallback DOM if no key. :contentReference[oaicite:3]{index=3}
-  // Edu/Bank: try PUBLIC first; if missing, try LIMITED v2.
   // =========================
   async function refreshFromServer() {
-    if (!masterToggle.checked) return;
+    if (!masterToggle.checked || !API_KEY) return;
 
-    // DRUG / BOOSTER (Public)
+    // DRUG / BOOSTER via v1 user cooldowns
     try {
-      if (PUBLIC_KEY && (toggles.drug || toggles.booster)) {
-        const cd = await xhrJSON(`https://api.torn.com/user/?selections=cooldowns&key=${encodeURIComponent(PUBLIC_KEY)}`); // :contentReference[oaicite:4]{index=4}
+      if (toggles.drug || toggles.booster) {
+        const cd = await xhrJSON(`https://api.torn.com/user/?selections=cooldowns&key=${encodeURIComponent(API_KEY)}`);
         const drugS = cd?.cooldowns?.drug ?? 0;
         const boosterS = cd?.cooldowns?.booster ?? 0;
 
@@ -361,105 +341,118 @@
       }
     } catch {}
 
-    // EDUCATION / BANK (Public first; fallback Limited if present)
+    // EDUCATION via v1 user education
     try {
-      if (PUBLIC_KEY && (toggles.edu || toggles.bank)) {
-        const promises = [];
-        if (toggles.edu) promises.push(xhrJSON(`https://api.torn.com/user/?selections=education&key=${encodeURIComponent(PUBLIC_KEY)}`));
-        else promises.push(Promise.resolve(null));
-        if (toggles.bank) promises.push(xhrJSON(`https://api.torn.com/user/?selections=money&key=${encodeURIComponent(PUBLIC_KEY)}`));
-        else promises.push(Promise.resolve(null));
-        const [edu, money] = await Promise.all(promises);
-
-        if (toggles.edu && edu) {
-          const timeLeft = edu?.education_timeleft ?? 0;
-          setEndFromSeconds('edu', timeLeft);
-          const wasActive = !!last.eduActive;
-          const activeNow = (edu?.education_current ?? 0) > 0 || timeLeft > 0;
-          if (wasActive && timeLeft === 0 && !withinSnooze('edu')) raiseAlert('edu', 'Education course finished.');
-          last.eduActive = activeNow;
-        }
-        if (toggles.bank && money) {
-          const bank = money?.bank || {};
-          const timeLeft = bank?.time_left ?? 0;
-          setEndFromSeconds('bank', timeLeft);
-          const wasActive = !!last.bankActive;
-          const activeNow = (bank?.amount ?? 0) > 0 && timeLeft >= 0;
-          if (wasActive && timeLeft === 0 && !withinSnooze('bank')) raiseAlert('bank', 'Bank investment finished.');
-          last.bankActive = activeNow;
-        }
+      if (toggles.edu) {
+        const edu = await xhrJSON(`https://api.torn.com/user/?selections=education&key=${encodeURIComponent(API_KEY)}`);
+        const timeLeft = edu?.education_timeleft ?? 0;
+        setEndFromSeconds('edu', timeLeft);
+        const wasActive = !!last.eduActive;
+        const activeNow = (edu?.education_current ?? 0) > 0 || timeLeft > 0;
+        if (wasActive && timeLeft === 0 && !withinSnooze('edu')) raiseAlert('edu', 'Education course finished.');
+        last.eduActive = activeNow;
       }
-    } catch {
-      // If public failed and a Limited key exists, you can optionally extend here to v2 endpoints for edu/bank if needed.
-    }
+    } catch {}
 
-    // OC (Limited v2 exact; else DOM fallback keeps running)
+    // BANK via v1 user money -> fallback to /bank.php DOM if idle but you actually have an investment
     try {
-      if (ocToggle.checked && LIMITED_KEY) {
-        const v2 = await xhrJSON(`https://api.torn.com/v2/user/?selections=organizedcrime&key=${encodeURIComponent(LIMITED_KEY)}`); // :contentReference[oaicite:5]{index=5}
-        // Expect: v2.organizedCrime.status, v2.organizedCrime.ready_at (epoch seconds)
-        const oc = v2?.organizedCrime;
-        if (oc && (oc.status === 'Planning' || oc.status === 'In Progress' || oc.ready_at)) {
+      if (toggles.bank) {
+        let bankTimeLeft = 0;
+        let bankActive = false;
+
+        // v1 money
+        try {
+          const money = await xhrJSON(`https://api.torn.com/user/?selections=money&key=${encodeURIComponent(API_KEY)}`);
+          const bank = money?.bank || {};
+          bankTimeLeft = bank?.time_left ?? 0;
+          const amount = bank?.amount ?? 0;
+          bankActive = amount > 0 && bankTimeLeft >= 0;
+
+          // If API claims idle (0) but you likely have something — try DOM fallback
+          if (amount > 0 && bankTimeLeft === 0) {
+            const dom = await readBankDom();
+            if (dom.secondsLeft != null) {
+              bankTimeLeft = dom.secondsLeft;
+              bankActive = bankTimeLeft > 0 || dom.ready === true;
+            }
+          }
+        } catch {
+          // API failed — try DOM fallback directly
+          const dom = await readBankDom();
+          if (dom.secondsLeft != null) {
+            bankTimeLeft = dom.secondsLeft;
+            bankActive = bankTimeLeft > 0 || dom.ready === true;
+          }
+        }
+
+        // apply
+        setEndFromSeconds('bank', bankTimeLeft);
+        const wasActive = !!last.bankActive;
+        const justFinished = wasActive && bankTimeLeft === 0;
+        if (justFinished && !withinSnooze('bank')) raiseAlert('bank', 'Bank investment finished.');
+        last.bankActive = bankActive;
+      }
+    } catch {}
+
+    // OC: Limited v2 exact; else DOM fallback (scan running separately)
+    try {
+      if (ocToggle.checked) {
+        const v2 = await xhrJSON(`https://api.torn.com/v2/user/?selections=organizedcrime&key=${encodeURIComponent(API_KEY)}`);
+        const oc = v2?.organizedCrime || v2?.organizedcrime || v2?.organized_crime; // be forgiving to casing keys
+        if (oc && (oc.status || oc.ready_at || oc.readyAt)) {
           const nowSec = Math.floor(Date.now() / 1000);
-          const left = Math.max(0, (oc.ready_at || nowSec) - nowSec);
+          const readyEpoch = (oc.ready_at || oc.readyAt || nowSec);
+          const left = Math.max(0, readyEpoch - nowSec);
           setEndFromSeconds('oc', left);
 
           const wasIn = !!last.ocInProgress;
           const nowIn = left > 0;
           if (wasIn && left === 0 && !withinSnooze('oc')) raiseAlert('oc', 'OC finished.');
           last.ocInProgress = nowIn;
-          ocUnknownStreak = 0; // stop DOM fallback "not in OC" conclusions while key present
+          ocUnknownStreak = 0; // skip DOM "not in OC" conclusions while API says in/known
         }
       }
     } catch {
-      // ignore; DOM fallback will handle
+      // ignore; DOM fallback covers unknown cases
     }
 
     await persist();
   }
 
   // =========================
-  // Local tick (renders the pill every second from end-times)
+  // DOM fallback readers
   // =========================
-  function renderPill() {
-    const setText = (id, secs) => { qs(id).textContent = fmtHMS(Math.max(0, secs)); };
-
-    // drug / booster
-    const drugLeft = ends.drug ? secLeftFromEnd(ends.drug) : 0;
-    const boosterLeft = ends.booster ? secLeftFromEnd(ends.booster) : 0;
-    setText('pill-drug', drugLeft);
-    setText('pill-booster', boosterLeft);
-
-    // edu / bank: show hh:mm:ss or 'idle'
-    const eduLeft = ends.edu ? secLeftFromEnd(ends.edu) : 0;
-    qs('pill-edu').textContent = ends.edu && eduLeft > 0 ? fmtHMS(eduLeft) : 'idle';
-    const bankLeft = ends.bank ? secLeftFromEnd(ends.bank) : 0;
-    qs('pill-bank').textContent = (ends.bank && bankLeft > 0) ? fmtHMS(bankLeft) : 'idle';
-
-    // OC
-    const ocLeft = ends.oc ? secLeftFromEnd(ends.oc) : 0;
-    qs('pill-oc').textContent = ends.oc ? (ocLeft > 0 ? fmtHMS(ocLeft) : 'ready') : (last.ocInProgress === false ? 'not in OC' : '…');
-
-    // post-finish alert guards for client tick (in case server poll crosses late)
-    if (toggles.drug && drugLeft === 0 && (last._drugWasZero !== true)) {
-      if (!withinSnooze('drug')) raiseAlert('drug', 'Drug cooldown is now 0.');
-      last._drugWasZero = true;
-    } else if (drugLeft > 0) { last._drugWasZero = false; }
-
-    if (toggles.oc && ends.oc && ocLeft === 0 && (last._ocWasZero !== true)) {
-      if (!withinSnooze('oc')) raiseAlert('oc', 'OC finished.');
-      last._ocWasZero = true;
-    } else if (ocLeft > 0) { last._ocWasZero = false; }
+  async function readBankDom() {
+    try {
+      const resp = await fetch('/bank.php', { credentials: 'same-origin' });
+      const html = await resp.text();
+      // Look for a data-timer or HH:MM(:SS)
+      const timerAttr = html.match(/data-timer\s*=\s*["'](\d+)["']/i);
+      if (timerAttr) {
+        const seconds = parseInt(timerAttr[1], 10);
+        return { secondsLeft: Number.isFinite(seconds) ? seconds : null, ready: seconds === 0 };
+      }
+      const m = html.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+      if (m) {
+        const h = parseInt(m[1], 10), mi = parseInt(m[2], 10), s = parseInt(m[3] || '0', 10);
+        const seconds = (h * 3600) + (mi * 60) + (isNaN(s) ? 0 : s);
+        return { secondsLeft: seconds, ready: seconds === 0 };
+      }
+      // A few phrases implying readiness (avoid over-firing)
+      if (/ready to withdraw|withdraw now/i.test(html)) {
+        return { secondsLeft: 0, ready: true };
+      }
+    } catch {}
+    return { secondsLeft: null, ready: false };
   }
 
-  // =========================
-  // OC DOM fallback (any Torn page)
-  // =========================
+  // OC DOM fallback (any Torn page) when API isn’t giving a time
   function scanOCDom() {
     if (!ocToggle.checked) return;
-    if (LIMITED_KEY) return; // when Limited is present, prefer exact API; skip fallback
 
-    // Heuristic: look for any OC widget/timer in common header/toolbar areas.
+    // if we already have an end-time, let the pill tick handle it
+    if (ends.oc && secLeftFromEnd(ends.oc) > 0) return;
+
     const body = document.body;
     const matchText = (s) => /organized\s*crime|organised\s*crime|\bOC\b/i.test(s || '');
 
@@ -475,8 +468,8 @@
     let secondsLeft = null, inProgress = false;
     if (ocNode) {
       const scope = ocNode.closest('*') || ocNode;
-      const candidateTimers = Array.from(scope.querySelectorAll('[data-timer],[data-countdown],[data-time-left],time,span,div'));
-      for (const el of candidateTimers) {
+      const cand = Array.from(scope.querySelectorAll('[data-timer],[data-countdown],[data-time-left],time,span,div'));
+      for (const el of cand) {
         const dt = el.getAttribute && (el.getAttribute('data-timer') || el.getAttribute('data-time-left') || el.getAttribute('data-countdown'));
         if (dt && /^\d+$/.test(dt)) { secondsLeft = parseInt(dt, 10); inProgress = secondsLeft > 0; break; }
         const txt = (el.textContent || '').trim();
@@ -504,6 +497,41 @@
         }
       }
     }
+  }
+
+  // =========================
+  // Local tick (renders the pill every second from end-times)
+  // =========================
+  function renderPill() {
+    const setText = (id, secs) => { qs(id).textContent = fmtHMS(Math.max(0, secs)); };
+
+    // drug / booster
+    const drugLeft = ends.drug ? secLeftFromEnd(ends.drug) : 0;
+    const boosterLeft = ends.booster ? secLeftFromEnd(ends.booster) : 0;
+    setText('pill-drug', drugLeft);
+    setText('pill-booster', boosterLeft);
+
+    // edu / bank: show hh:mm:ss or 'idle'
+    const eduLeft = ends.edu ? secLeftFromEnd(ends.edu) : 0;
+    qs('pill-edu').textContent = ends.edu && eduLeft > 0 ? fmtHMS(eduLeft) : 'idle';
+
+    const bankLeft = ends.bank ? secLeftFromEnd(ends.bank) : 0;
+    qs('pill-bank').textContent = (ends.bank && bankLeft > 0) ? fmtHMS(bankLeft) : (last.bankActive ? 'ready' : 'idle');
+
+    // OC
+    const ocLeft = ends.oc ? secLeftFromEnd(ends.oc) : 0;
+    qs('pill-oc').textContent = ends.oc ? (ocLeft > 0 ? fmtHMS(ocLeft) : 'ready') : (last.ocInProgress === false ? 'not in OC' : '…');
+
+    // post-finish fences
+    if (toggles.drug && drugLeft === 0 && (last._drugWasZero !== true)) {
+      if (!withinSnooze('drug')) raiseAlert('drug', 'Drug cooldown is now 0.');
+      last._drugWasZero = true;
+    } else if (drugLeft > 0) { last._drugWasZero = false; }
+
+    if (toggles.oc && ends.oc && ocLeft === 0 && (last._ocWasZero !== true)) {
+      if (!withinSnooze('oc')) raiseAlert('oc', 'OC finished.');
+      last._ocWasZero = true;
+    } else if (ocLeft > 0) { last._ocWasZero = false; }
   }
 
   // =========================
@@ -546,15 +574,12 @@
     if (min) { panel.style.display = 'none'; miniTab.style.display = 'block'; GM_setValue(STORAGE.minimized, true); }
     else { panel.style.display = 'block'; miniTab.style.display = 'none'; GM_setValue(STORAGE.minimized, false); }
   }
-  qs('tcos-min').addEventListener('click', () => setMinimised(true));
-  miniTab.addEventListener('click', () => setMinimised(false));
 
   // =========================
   // Events
   // =========================
   qs('tcos-save').addEventListener('click', async () => {
-    PUBLIC_KEY = pubInput.value.trim();
-    LIMITED_KEY = limInput.value.trim();
+    API_KEY = keyInput.value.trim();
     toggles = {
       drug: !!drugToggle.checked,
       booster: !!boosterToggle.checked,
@@ -573,11 +598,6 @@
     scanOCDom();
   });
 
-  masterToggle.addEventListener('change', () => {
-    if (!masterToggle.checked) { stopFlash(); }
-  });
-
-  // Tests menu
   const testsBtn = qs('tcos-tests-btn');
   const testsMenu = qs('tcos-tests-menu');
   testsBtn.addEventListener('click', (e) => {
@@ -587,6 +607,7 @@
   document.addEventListener('click', (e) => {
     if (!testsMenu.contains(e.target) && e.target !== testsBtn) testsMenu.style.display = 'none';
   });
+
   // Test buttons
   qs('tcos-test-drug').addEventListener('click', () => { currentAlertKey = 'drug';    raiseAlert('drug',   'Test: Drug cooldown is now 0.'); });
   qs('tcos-test-booster').addEventListener('click', () => { currentAlertKey = 'booster'; raiseAlert('booster','Test: Booster cooldown ≤ 20h.'); });
@@ -605,7 +626,7 @@
     pillTick = setInterval(renderPill, TICK_MS);
     renderPill();
 
-    // start polls after load (if user had keys saved)
+    // start polls after load (if user had key saved)
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(refreshFromServer, POLL_MS);
     refreshFromServer();
