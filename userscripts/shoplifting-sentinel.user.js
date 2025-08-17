@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Shoplifting Sentinel (Full-Screen Flash Alerts)
 // @namespace    https://github.com/BazookaJoe58
-// @version      1.0.5
+// @version      1.0.6
 // @description  Full-screen flashing alert when selected shoplifting securities are down. Per-store toggles for BOTH / Camera / Guards, draggable UI, API key input, interval control. (Public API key only.) Flash is click-through; Acknowledge box stays clickable. Panel hidden by default; open via side tab or status-bar "S" icon. Includes a 15-minute global Snooze.
 // @author       BazookaJoe
 // @match        https://www.torn.com/*
@@ -24,17 +24,16 @@
     cfg: 'tsentinel_cfg',
     pos: 'tsentinel_pos',
     lastShops: 'tsentinel_last_shops',
-    lastPanelOpen: 'tsentinel_last_open', // remember last open/closed state if you want later
+    lastOpen: 'tsentinel_last_open', // 'open' | 'closed'
   };
 
   const DEFAULT_CFG = {
     enabled: true,
     intervalSec: 15,
-    // storeConfig: { [storeKey]: { both: false, camera: false, guards: false } }
-    storeConfig: {},
+    storeConfig: {},               // { [storeKey]: { both, camera, guards } }
     perStoreCooldownSec: 30,
-    lastFired: {}, // storeKey -> unix seconds
-    snoozeUntil: 0, // unix seconds (global snooze)
+    lastFired: {},                 // storeKey -> unix seconds
+    snoozeUntil: 0,                // unix seconds (global snooze)
   };
 
   function loadJSON(key, fallback) {
@@ -45,12 +44,13 @@
 
   let CFG = loadJSON(SKEY.cfg, DEFAULT_CFG);
   let API_KEY = GM_getValue(SKEY.apiKey, '');
+  let LAST_OPEN = GM_getValue(SKEY.lastOpen, 'closed');
 
   // ------------------------ CSS ------------------------
   GM_addStyle(`
   #tsentinel-wrap {
     position: fixed; z-index: 2147483000; width: 300px; box-sizing: border-box;
-    top: 40px; left: 40px; background: #fff; color: #222; border-radius: 12px;
+    top: 80px; left: 40px; background: #fff; color: #222; border-radius: 12px;
     box-shadow: 0 8px 30px rgba(0,0,0,.25); font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
     display: none; /* hidden by default */
     flex-direction: column; overflow: hidden; border: 1px solid rgba(0,0,0,.08);
@@ -108,11 +108,11 @@
   #tsentinel-snooze { background: #b0d8ff; color: #003a75; }
   #tsentinel-snooze:hover { filter: brightness(0.96); }
 
-  /* Tiny statusbar button (optional quick toggle) */
+  /* Statusbar button (backup quick toggle) */
   #tsentinel-icon { width: 18px; height: 18px; cursor:pointer; opacity:.75; border-radius:4px; background:#eaeaea; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; }
   #tsentinel-icon:hover { opacity:1; }
 
-  /* NEW: sticky side tab to toggle the panel */
+  /* Sticky side tab to toggle the panel */
   #tsentinel-tab {
     position: fixed; top: 50%; right: 0; transform: translateY(-50%);
     z-index: 2147483645; background: #333; color: #fff; padding: 10px 12px;
@@ -136,11 +136,7 @@
   // ------------------------ Flash + Modal (click-through flash) ------------------------
   function ensureFlash() {
     let el = document.getElementById('tsentinel-flash');
-    if (!el) {
-      el = document.createElement('div');
-      el.id = 'tsentinel-flash';
-      document.documentElement.appendChild(el);
-    }
+    if (!el) { el = document.createElement('div'); el.id = 'tsentinel-flash'; document.documentElement.appendChild(el); }
     return el;
   }
   function ensureModal() {
@@ -160,8 +156,7 @@
       document.documentElement.appendChild(m);
       m.querySelector('#tsentinel-ack').addEventListener('click', hideAlert);
       m.querySelector('#tsentinel-snooze').addEventListener('click', () => {
-        const end = nowSec() + 15 * 60;
-        CFG.snoozeUntil = end;
+        CFG.snoozeUntil = nowSec() + 15 * 60;
         saveJSON(SKEY.cfg, CFG);
         updateSnoozeNote();
         hideAlert();
@@ -171,18 +166,11 @@
     updateSnoozeNote();
     return m;
   }
-
   function updateSnoozeNote() {
     const note = document.getElementById('tsentinel-modal-note');
     if (!note) return;
     const remaining = CFG.snoozeUntil - nowSec();
-    if (remaining > 0) {
-      const mins = Math.floor(remaining / 60);
-      const secs = remaining % 60;
-      note.textContent = `Snoozed: ${mins}m ${secs}s remaining`;
-    } else {
-      note.textContent = '';
-    }
+    note.textContent = remaining > 0 ? `Snoozed: ${Math.floor(remaining/60)}m ${remaining%60}s remaining` : '';
   }
   let snoozeTimer = null;
   function startSnoozeTicker() {
@@ -192,12 +180,10 @@
       updateSnoozeNote();
     }, 500);
   }
-
   function showAlert(reason) {
     try { if (typeof GM_notification === 'function') GM_notification({ title: 'Shoplifting Sentinel', text: reason || 'Alert', timeout: 4000 }); } catch {}
-    const flash = ensureFlash();
+    ensureFlash().style.display = 'block';
     const modal = ensureModal();
-    flash.style.display = 'block';
     modal.style.display = 'block';
     const reasonEl = modal.querySelector('#tsentinel-modal-reason');
     if (reasonEl) reasonEl.textContent = reason || 'Security down';
@@ -213,6 +199,39 @@
     try { if (typeof GM_notification === 'function') GM_notification({ title: 'Shoplifting Sentinel', text: msg, timeout: 2500 }); } catch {}
   }
 
+  // ------------------------ Panel Open/Close via Tab/Icon ------------------------
+  function getPanel() { return document.getElementById('tsentinel-wrap'); }
+  function ensurePanel() { if (!getPanel()) buildPanel(); return getPanel(); }
+
+  function autoAnchorRight(panel) {
+    // If never positioned before, place near right edge so it's visible next to the side tab
+    if (!panel.dataset.autopos) {
+      panel.style.left = 'auto';
+      panel.style.right = '70px';
+      panel.style.top = '100px';
+      panel.dataset.autopos = '1';
+    }
+  }
+
+  function openPanel() {
+    const panel = ensurePanel();
+    autoAnchorRight(panel);
+    panel.style.display = '';
+    GM_setValue(SKEY.lastOpen, 'open');
+    updateSideTabLabel();
+  }
+  function closePanel() {
+    const panel = getPanel();
+    if (panel) panel.style.display = 'none';
+    GM_setValue(SKEY.lastOpen, 'closed');
+    updateSideTabLabel();
+  }
+  function togglePanel() {
+    const panel = ensurePanel();
+    const nowOpen = panel.style.display !== 'none';
+    if (nowOpen) closePanel(); else openPanel();
+  }
+
   // ------------------------ UI Build ------------------------
   function buildPanel() {
     if (document.getElementById('tsentinel-wrap')) return;
@@ -221,11 +240,15 @@
     wrap.id = 'tsentinel-wrap';
     wrap.style.display = 'none'; // hidden by default
 
-    // restore position
+    // restore position if we have it
     try {
-      const pos = loadJSON(SKEY.pos, { x: 40, y: 40 });
-      wrap.style.left = pos.x + 'px';
-      wrap.style.top = pos.y + 'px';
+      const pos = loadJSON(SKEY.pos, null);
+      if (pos && typeof pos.x === 'number' && typeof pos.y === 'number') {
+        wrap.style.left = pos.x + 'px';
+        wrap.style.top = pos.y + 'px';
+      } else {
+        // don't set left; let autoAnchorRight() handle first open placement
+      }
     } catch {}
 
     wrap.innerHTML = `
@@ -263,7 +286,7 @@
       const header = wrap.querySelector('#tsentinel-header');
       let sx=0, sy=0, ox=0, oy=0, dragging=false;
       header.addEventListener('mousedown', e => { dragging = true; sx = e.clientX; sy = e.clientY; ox = wrap.offsetLeft; oy = wrap.offsetTop; e.preventDefault(); });
-      window.addEventListener('mousemove', e => { if (!dragging) return; const dx = e.clientX - sx, dy = e.clientY - sy; wrap.style.left = (ox + dx) + 'px'; wrap.style.top = (oy + dy) + 'px'; });
+      window.addEventListener('mousemove', e => { if (!dragging) return; const dx = e.clientX - sx, dy = e.clientY - sy; wrap.style.left = (ox + dx) + 'px'; wrap.style.top = (oy + dy) + 'px'; wrap.style.right = 'auto'; });
       window.addEventListener('mouseup', () => { if (dragging) saveJSON(SKEY.pos, { x: wrap.offsetLeft, y: wrap.offsetTop }); dragging = false; });
     })();
 
@@ -281,9 +304,7 @@
     $api.value = API_KEY || '';
     $interval.value = CFG.intervalSec;
 
-    $iconBtn.addEventListener('click', () => {
-      wrap.style.display = (wrap.style.display === 'none') ? '' : 'none';
-    });
+    $iconBtn.addEventListener('click', togglePanel);
 
     $saveKey.addEventListener('click', async () => {
       API_KEY = $api.value.trim();
@@ -306,26 +327,30 @@
     $refresh.addEventListener('click', () => pingNow(true, $stores));
     $test.addEventListener('click', () => { showAlert('TEST — manual check'); });
 
-    // Render cached shops immediately (if any) so toggles appear as soon as you open the panel
+    // cached stores (so toggles appear ASAP next open)
     const cached = loadJSON(SKEY.lastShops, null);
     if (cached && Array.isArray(cached)) renderStores(cached, $stores);
 
-    // auto-start polling if enabled (panel stays hidden)
     if (CFG.enabled) startPolling();
+
+    // honor last open/closed state if you ever want that behavior back:
+    if (LAST_OPEN === 'open') openPanel();
   }
 
   // ------------------------ Side Tab ------------------------
+  function updateSideTabLabel() {
+    const tab = document.getElementById('tsentinel-tab');
+    const panel = getPanel();
+    const open = panel && panel.style.display !== 'none';
+    if (tab) tab.textContent = open ? 'CLOSE SENTINEL' : 'OPEN SENTINEL';
+  }
   function buildSideTab() {
     if (document.getElementById('tsentinel-tab')) return;
     const tab = document.createElement('div');
     tab.id = 'tsentinel-tab';
-    tab.textContent = 'SENTINEL';
+    tab.textContent = 'OPEN SENTINEL';
     tab.title = 'Open/close Shoplifting Sentinel';
-    tab.addEventListener('click', () => {
-      const panel = document.getElementById('tsentinel-wrap') || (buildPanel(), document.getElementById('tsentinel-wrap'));
-      if (!panel) return;
-      panel.style.display = (panel.style.display === 'none') ? '' : 'none';
-    });
+    tab.addEventListener('click', () => togglePanel());
     document.documentElement.appendChild(tab);
   }
 
@@ -338,7 +363,6 @@
     list.forEach(({ key, status }) => {
       ensureStoreEntry(key);
 
-      // derive down states
       let camDown = null, grdDown = null;
       status.forEach(d => {
         const t = (d.title || '').toLowerCase();
@@ -372,13 +396,11 @@
       `;
       $stores.appendChild(card);
 
-      // set stored states
       const cfg = CFG.storeConfig[key];
       card.querySelector('input[data-f="both"]').checked   = !!cfg.both;
       card.querySelector('input[data-f="camera"]').checked = !!cfg.camera;
       card.querySelector('input[data-f="guards"]').checked = !!cfg.guards;
 
-      // attach changes
       card.querySelectorAll('input[type="checkbox"]').forEach(chk => {
         chk.addEventListener('change', () => {
           const f = chk.dataset.f, k = chk.dataset.k;
@@ -419,12 +441,9 @@
       const raw = await fetchShoplifting();
       const entries = Object.entries(raw).map(([key, status]) => ({ key, status }));
 
-      // cache shops so toggles show next time you open the panel
       saveJSON(SKEY.lastShops, entries);
-
       renderStores(entries, $storesEl);
 
-      // Decide alerts
       const now = nowSec();
       const snoozed = CFG.snoozeUntil > now;
 
@@ -449,7 +468,7 @@
         }
 
         if (shouldAlert) {
-          if (snoozed) return; // skip while snoozed
+          if (snoozed) return;
 
           const last = CFG.lastFired[key] || 0;
           if (now - last >= (CFG.perStoreCooldownSec || 30)) {
@@ -486,11 +505,12 @@
     const tryMount = () => {
       if (!document.body) return void setTimeout(tryMount, 200);
       buildPanel();
-      buildSideTab(); // ensure the side tab is always present
+      buildSideTab();         // ensure the side tab is always present
+      updateSideTabLabel();   // reflect initial state
     };
     tryMount();
 
-    // Tiny "S" button in status bar for quick toggle (backup)
+    // Status bar "S" icon (backup)
     const injectStatusIcon = () => {
       const bar = document.querySelector('ul[class*=status-icons]');
       if (!bar) return setTimeout(injectStatusIcon, 1000);
@@ -498,20 +518,16 @@
       const li = document.createElement('li'); li.className = 'tsentinel-entry';
       const btn = document.createElement('div'); btn.id = 'tsentinel-icon'; btn.textContent = 'S';
       btn.title = 'Shoplifting Sentinel – toggle panel';
-      btn.addEventListener('click', () => {
-        const panel = document.getElementById('tsentinel-wrap');
-        if (panel) panel.style.display = (panel.style.display === 'none') ? '' : 'none';
-      });
+      btn.addEventListener('click', togglePanel);
       li.appendChild(btn); bar.prepend(li);
     };
     injectStatusIcon();
 
     // Keep UI alive if Torn does SPA swaps
     const mo = new MutationObserver(() => {
-      if (!document.getElementById('tsentinel-wrap')) buildPanel();
-      if (!document.getElementById('tsentinel-tab')) buildSideTab();
-      const modal = document.getElementById('tsentinel-modal');
-      if (modal && modal.style.display !== 'none') startSnoozeTicker();
+      if (!getPanel()) buildPanel();
+      if (!document.getElementById('tsentinel-tab')) { buildSideTab(); }
+      updateSideTabLabel();
     });
     mo.observe(document.documentElement, { childList: true, subtree: true });
   });
