@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Shoplifting Sentinel (Full-Screen Flash Alerts)
 // @namespace    https://github.com/BazookaJoe58
-// @version      1.0.4
-// @description  Full-screen flashing alert when selected shoplifting securities are down. Per-store toggles for BOTH / Camera / Guards, draggable UI, API key input, interval control. PDA-friendly. (Public API key only.) Flash is click-through; Acknowledge box stays clickable until closed. Panel hidden by default; open via status-bar "S" icon. Includes a 15-minute global Snooze.
+// @version      1.0.5
+// @description  Full-screen flashing alert when selected shoplifting securities are down. Per-store toggles for BOTH / Camera / Guards, draggable UI, API key input, interval control. (Public API key only.) Flash is click-through; Acknowledge box stays clickable. Panel hidden by default; open via side tab or status-bar "S" icon. Includes a 15-minute global Snooze.
 // @author       BazookaJoe
 // @match        https://www.torn.com/*
 // @run-at       document-end
@@ -24,6 +24,7 @@
     cfg: 'tsentinel_cfg',
     pos: 'tsentinel_pos',
     lastShops: 'tsentinel_last_shops',
+    lastPanelOpen: 'tsentinel_last_open', // remember last open/closed state if you want later
   };
 
   const DEFAULT_CFG = {
@@ -110,6 +111,17 @@
   /* Tiny statusbar button (optional quick toggle) */
   #tsentinel-icon { width: 18px; height: 18px; cursor:pointer; opacity:.75; border-radius:4px; background:#eaeaea; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; }
   #tsentinel-icon:hover { opacity:1; }
+
+  /* NEW: sticky side tab to toggle the panel */
+  #tsentinel-tab {
+    position: fixed; top: 50%; right: 0; transform: translateY(-50%);
+    z-index: 2147483645; background: #333; color: #fff; padding: 10px 12px;
+    border-top-left-radius: 8px; border-bottom-left-radius: 8px;
+    cursor: pointer; user-select: none; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    font-size: 12px; font-weight: 800; letter-spacing: .5px;
+    box-shadow: 0 6px 18px rgba(0,0,0,.3);
+  }
+  #tsentinel-tab:hover { filter: brightness(1.08); }
   `);
 
   // ------------------------ Helpers ------------------------
@@ -152,7 +164,7 @@
         CFG.snoozeUntil = end;
         saveJSON(SKEY.cfg, CFG);
         updateSnoozeNote();
-        hideAlert(); // close current alert immediately
+        hideAlert();
         toast('Alerts snoozed for 15 minutes');
       });
     }
@@ -207,7 +219,7 @@
 
     const wrap = document.createElement('div');
     wrap.id = 'tsentinel-wrap';
-    wrap.style.display = 'none'; // hidden by default; open via icon
+    wrap.style.display = 'none'; // hidden by default
 
     // restore position
     try {
@@ -300,6 +312,21 @@
 
     // auto-start polling if enabled (panel stays hidden)
     if (CFG.enabled) startPolling();
+  }
+
+  // ------------------------ Side Tab ------------------------
+  function buildSideTab() {
+    if (document.getElementById('tsentinel-tab')) return;
+    const tab = document.createElement('div');
+    tab.id = 'tsentinel-tab';
+    tab.textContent = 'SENTINEL';
+    tab.title = 'Open/close Shoplifting Sentinel';
+    tab.addEventListener('click', () => {
+      const panel = document.getElementById('tsentinel-wrap') || (buildPanel(), document.getElementById('tsentinel-wrap'));
+      if (!panel) return;
+      panel.style.display = (panel.style.display === 'none') ? '' : 'none';
+    });
+    document.documentElement.appendChild(tab);
   }
 
   // ------------------------ Rendering ------------------------
@@ -399,9 +426,8 @@
 
       // Decide alerts
       const now = nowSec();
-
-      // If globally snoozed, skip alert checks entirely
       const snoozed = CFG.snoozeUntil > now;
+
       entries.forEach(({ key, status }) => {
         ensureStoreEntry(key);
         const cfg = CFG.storeConfig[key];
@@ -423,8 +449,7 @@
         }
 
         if (shouldAlert) {
-          // If snoozed, do not fire, but keep cooldown timestamps so we don't spam after snooze ends
-          if (snoozed) return;
+          if (snoozed) return; // skip while snoozed
 
           const last = CFG.lastFired[key] || 0;
           if (now - last >= (CFG.perStoreCooldownSec || 30)) {
@@ -449,7 +474,6 @@
         const $api = document.getElementById('tsentinel-apikey');
         if ($api) { $api.style.outline = '2px solid #e33'; setTimeout(() => ($api.style.outline = ''), 1500); }
       }
-      // console.warn('[Shoplifting Sentinel]', e);
     } finally { busy = false; }
   }
 
@@ -462,10 +486,11 @@
     const tryMount = () => {
       if (!document.body) return void setTimeout(tryMount, 200);
       buildPanel();
+      buildSideTab(); // ensure the side tab is always present
     };
     tryMount();
 
-    // Tiny "S" button in status bar for quick toggle
+    // Tiny "S" button in status bar for quick toggle (backup)
     const injectStatusIcon = () => {
       const bar = document.querySelector('ul[class*=status-icons]');
       if (!bar) return setTimeout(injectStatusIcon, 1000);
@@ -481,10 +506,10 @@
     };
     injectStatusIcon();
 
-    // Keep panel available if Torn does SPA swaps (stays hidden until you toggle)
+    // Keep UI alive if Torn does SPA swaps
     const mo = new MutationObserver(() => {
       if (!document.getElementById('tsentinel-wrap')) buildPanel();
-      // keep snooze note ticking if modal open
+      if (!document.getElementById('tsentinel-tab')) buildSideTab();
       const modal = document.getElementById('tsentinel-modal');
       if (modal && modal.style.display !== 'none') startSnoozeTicker();
     });
