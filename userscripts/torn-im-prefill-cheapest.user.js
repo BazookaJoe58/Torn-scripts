@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Item Market — Prefill Cheapest (List View + API wallet)
+// @name         Torn Item Market — Prefill + Buy/Fill Max (List View + API wallet)
 // @namespace    https://torn.city/
-// @version      1.2.0
-// @description  Adds a "Buy Max" button on each listing. Single-click fills and focuses native Buy; Shift-click also clicks native Buy. Uses Torn API (user?selections=money) if set; header fallback. Still supports cheapest-row highlighting and afford badges. No background auto-buy.
+// @version      1.3.0
+// @description  Afford badges, Fill Max in Qty cell, Buy Max per row. Uses Torn API (user?selections=money) if set; header fallback. No confirmation bypass; stays compliant.
 // @author       BazookaJoe
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
@@ -20,37 +20,45 @@
 (function () {
   'use strict';
 
+  // ---------- Styles ----------
   GM_addStyle(`
     .im-afford-badge{display:inline-block;margin-left:8px;padding:2px 6px;font-size:11px;line-height:1.2;border-radius:999px;
       background:rgba(20,20,20,.9);color:#cfead6;border:1px solid rgba(120,200,160,.45);white-space:nowrap;vertical-align:middle}
     .im-afford-badge.im-zero{color:#f7d5d5;border-color:rgba(220,120,120,.5)}
     .im-flash{box-shadow:0 0 0 3px rgba(0,160,255,.55)!important;transition:box-shadow .25s ease}
     .im-cheapest-row{outline:2px dashed rgba(34,197,94,.55);outline-offset:2px;border-radius:6px}
+
     .im-api-pill{position:fixed;right:10px;bottom:10px;z-index:999999;background:#0f172a;color:#e5f1ff;border:1px solid #334155;
       border-radius:999px;padding:4px 8px;font-size:11px;cursor:pointer}
     .im-api-pill.ok{border-color:#22c55e}.im-api-pill.err{border-color:#ef4444}
+
     .im-buymax{margin-left:6px;padding:2px 8px;font-size:11px;border-radius:8px;border:1px solid #374151;background:#101827;color:#e5e7eb;cursor:pointer}
     .im-buymax:hover{filter:brightness(1.1)}
     .im-buymax[disabled]{opacity:.5;cursor:not-allowed}
+
+    .im-available-cell{position:relative}
+    .im-fillmax{position:absolute;top:20px;right:7px;padding:2px 6px;font-size:11px;border-radius:8px;border:1px solid var(--tt-color-green, #16a34a);
+      color:var(--tt-color-green, #16a34a);background:transparent;cursor:pointer;line-height:1.1}
+    body:not(.tt-mobile):not(.tt-tablet) .im-fillmax:hover{color:#fff;background:var(--tt-color-green, #16a34a)}
   `);
 
-  // ----- selectors from your DOM -----
+  // ---------- Selectors (from your DOM) ----------
   const SEL = {
     list: 'ul[class*="sellerList"]',
     rowWrapper: 'li[class*="rowWrapper"]',
     row: 'div[class*="sellerRow"]',
     price: 'div[class*="price"]',
-    qty: 'div[class*="available"]',
+    qtyCell: 'div[class*="available"]',
+    qtyText: 'div[class*="available"]',
     showBtn: 'button[class*="showBuyControlsButton"]',
-    // buy panel bits (after expand)
     amountInputs: 'input:not([type="checkbox"]):not([type="hidden"])',
-    buyButtons: 'button, a'
+    buyButtons: 'button, a',
   };
 
+  // ---------- Utils ----------
   const isMarketPage = () => /page\.php\?sid=ItemMarket/i.test(location.href);
   const parseMoney = (s)=>{ s=String(s||'').replace(/[^\d.]/g,''); return s?Math.floor(Number(s)):NaN; };
   const toInt = (s)=>{ const m=String(s||'').match(/\d[\d,]*/); return m?Number(m[0].replace(/[^\d]/g,'')):NaN; };
-
   const setInputValue = (input, value) => {
     const proto=Object.getPrototypeOf(input);
     const setter=Object.getOwnPropertyDescriptor(proto,'value')?.set;
@@ -59,8 +67,9 @@
     input.dispatchEvent(new Event('change',{bubbles:true}));
   };
   const flash = (el)=>{ el.classList.add('im-flash'); setTimeout(()=>el.classList.remove('im-flash'),280); };
+  const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
 
-  // ----- API wallet (optional) -----
+  // ---------- API wallet (optional) ----------
   const KEY_STORE='torn_api_key_prefill_v1';
   let apiKey=GM_getValue(KEY_STORE,'');
   const apiPill=document.createElement('div'); apiPill.className='im-api-pill'; apiPill.textContent='API: off';
@@ -79,13 +88,13 @@
   }
 
   const httpGetJSON=(url)=>new Promise((res,rej)=>GM_xmlhttpRequest({method:'GET',url,headers:{Accept:'application/json'},
-    onload:r=>{try{res({status:r.status,data:JSON.parse(r.responseText)})}catch(e){rej(e)}},onerror:rej,ontimeout:()=>rej(new Error('timeout'))}));
+    onload:r=>{try{res(JSON.parse(r.responseText))}catch(e){rej(e)}},onerror:rej,ontimeout:()=>rej(new Error('timeout'))}));
 
   let WALLET_CACHE={val:NaN,t:0}; const WALLET_TTL_MS=10_000;
   async function readWalletAPI(){
     const now=Date.now(); if (now-WALLET_CACHE.t<WALLET_TTL_MS) return WALLET_CACHE.val;
     if (!apiKey) throw new Error('no_api_key');
-    const {data}=await httpGetJSON(`https://api.torn.com/user/?selections=money&key=${encodeURIComponent(apiKey)}`);
+    const data=await httpGetJSON(`https://api.torn.com/user/?selections=money&key=${encodeURIComponent(apiKey)}`);
     if (data?.error) throw new Error(`api_error_${data.error?.code||'x'}`);
     const val=Number(data?.money_onhand); if (!Number.isFinite(val)) throw new Error('no_money_onhand');
     WALLET_CACHE={val,t:now}; return val;
@@ -105,15 +114,15 @@
     return readWalletHeader();
   }
 
-  // ----- list helpers -----
+  // ---------- DOM helpers ----------
   const findRows = () => {
     const list=document.querySelector(SEL.list); if (!list) return [];
     return Array.from(list.querySelectorAll(`${SEL.rowWrapper} > ${SEL.row}`)).filter(r=>r.offsetParent!==null);
   };
-  function getRowWrapper(node){ return node.closest(SEL.rowWrapper) || node.closest('li') || document.body; }
+  const rowWrapper = (row)=>row.closest(SEL.rowWrapper) || row.closest('li') || document.body;
 
   function findAmountInputForRow(row){
-    const li=getRowWrapper(row);
+    const li=rowWrapper(row);
     const candidates=Array.from(li.querySelectorAll(SEL.amountInputs)).filter(inp=>{
       if (!(inp instanceof HTMLInputElement)) return false;
       if (inp.type==='checkbox' || inp.type==='hidden' || inp.disabled) return false;
@@ -121,34 +130,28 @@
     });
     if (!candidates.length) return null;
     const btn=row.querySelector(SEL.showBtn);
-    const byPref=candidates.sort((a,b)=>{
+    return candidates.sort((a,b)=>{
       const an=a.type==='number'?0:1, bn=b.type==='number'?0:1;
       if (an!==bn) return an-bn;
       if (btn){ const aD=distance(btn,a), bD=distance(btn,b); return aD-bD; }
       return 0;
-    });
-    return byPref[0];
+    })[0];
   }
 
   function findNativeBuyButton(row){
-    const li=getRowWrapper(row);
+    const li=rowWrapper(row);
     const btns=Array.from(li.querySelectorAll(SEL.buyButtons)).filter(b=>{
       const txt=(b.textContent||'').trim().toLowerCase();
       if (!txt) return false;
-      if (/show\s*buy/i.test(txt)) return false; // skip the toggle button
+      if (/show\s*buy/i.test(txt)) return false;
       return /buy|confirm/i.test(txt);
     });
-    // Prefer a real button element that is visible
     const visible=btns.filter(b=>b.getBoundingClientRect().height>0 && b.getBoundingClientRect().width>0);
     return visible[0] || btns[0] || null;
   }
 
-  function distance(a,b){
-    const ra=a.getBoundingClientRect(), rb=b.getBoundingClientRect();
-    const cxA=ra.left+ra.width/2, cyA=ra.top+ra.height/2;
-    const cxB=rb.left+rb.width/2, cyB=rb.top+rb.height/2;
-    return Math.hypot(cxA-cxB, cyA-cyB);
-  }
+  const distance=(a,b)=>{const ra=a.getBoundingClientRect(),rb=b.getBoundingClientRect();
+    return Math.hypot((ra.left+ra.width/2)-(rb.left+rb.width/2),(ra.top+ra.height/2)-(rb.top+rb.height/2));};
 
   const computeAfford = (wallet, unitPrice, qty) => {
     if (!Number.isFinite(wallet) || wallet<=0) return 0;
@@ -166,73 +169,85 @@
     return badge;
   };
 
+  // ---------- Fill Max button (in Qty cell) ----------
+  function ensureFillMax(row){
+    const qtyCell=row.querySelector(SEL.qtyCell);
+    if (!qtyCell) return;
+    qtyCell.classList.add('im-available-cell');
+
+    let btn=qtyCell.querySelector(':scope > .im-fillmax');
+    if (!btn){
+      btn=document.createElement('button');
+      btn.type='button';
+      btn.className='im-fillmax';
+      btn.textContent='Fill Max';
+      qtyCell.appendChild(btn);
+
+      btn.addEventListener('click', async ()=>{
+        const priceEl=row.querySelector(SEL.price);
+        const unitPrice=parseMoney(priceEl?.textContent);
+        const qty=toInt(row.querySelector(SEL.qtyText)?.textContent);
+        const wallet=await getWallet();
+        const afford=computeAfford(wallet, unitPrice, qty);
+
+        const show=row.querySelector(SEL.showBtn);
+        if (show) show.click();
+
+        let input=null, t0=performance.now();
+        while (!input && performance.now()-t0<3000){
+          await sleep(40);
+          input=findAmountInputForRow(row);
+        }
+        if (!input){ alert('Could not find amount input for this listing.'); return; }
+        setInputValue(input, afford>0?afford:'');
+        if (afford<=0) input.placeholder='Insufficient funds';
+        flash(input); input.focus();
+      });
+    }
+  }
+
+  // ---------- Buy Max button (per row) ----------
   function ensureBuyMaxButton(row){
-    const btn=row.querySelector(SEL.showBtn) || row;
-    let buyMax = (btn.parentElement && btn.parentElement.querySelector?.(':scope > .im-buymax')) || null;
+    const anchor=row.querySelector(SEL.showBtn) || row;
+    let buyMax = (anchor.parentElement && anchor.parentElement.querySelector?.(':scope > .im-buymax')) || null;
     if (!buyMax){
       buyMax=document.createElement('button');
       buyMax.type='button';
       buyMax.className='im-buymax';
       buyMax.textContent='Buy Max';
-      btn.insertAdjacentElement('afterend', buyMax);
-    }
-    if (!buyMax.__imHooked){
-      buyMax.__imHooked=true;
+      anchor.insertAdjacentElement('afterend', buyMax);
       buyMax.addEventListener('click', async (e)=>{
         buyMax.disabled=true;
         try{
-          const priceEl=row.querySelector(SEL.price);
-          const qtyEl=row.querySelector(SEL.qty);
-          const unitPrice=parseMoney(priceEl?.textContent);
-          const qty=toInt(qtyEl?.textContent);
+          const unitPrice=parseMoney(row.querySelector(SEL.price)?.textContent);
+          const qty=toInt(row.querySelector(SEL.qtyText)?.textContent);
           const wallet=await getWallet();
           const afford=computeAfford(wallet, unitPrice, qty);
-
           ensureAffordBadge(row, afford);
 
-          // make sure controls are open
           const show=row.querySelector(SEL.showBtn);
           if (show) show.click();
 
-          // wait for input
-          const t0=performance.now();
-          let input=null;
-          while (performance.now()-t0<3000 && !input){
+          let input=null, t0=performance.now();
+          while (!input && performance.now()-t0<3000){
             await sleep(40);
             input=findAmountInputForRow(row);
           }
-          if (!input){
-            alert('Could not find amount input for this listing.');
-            return;
-          }
+          if (!input){ alert('Could not find amount input for this listing.'); return; }
+
           setInputValue(input, afford>0?afford:'');
           if (afford<=0){ input.placeholder='Insufficient funds'; flash(input); return; }
           flash(input);
 
           const nativeBuy=findNativeBuyButton(row);
-          if (!nativeBuy){
-            // focus input so user can press Enter
-            input.focus();
-            return;
-          }
-
-          if (e.shiftKey){
-            // Shift-click = also click Buy
-            nativeBuy.click();
-          } else {
-            // Single click = focus Buy (safer)
-            nativeBuy.focus();
-          }
-        } finally {
-          buyMax.disabled=false;
-        }
+          if (!nativeBuy){ input.focus(); return; }
+          if (e.shiftKey){ nativeBuy.click(); } else { nativeBuy.focus(); }
+        } finally { buyMax.disabled=false; }
       });
     }
   }
 
-  function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
-
-  // Cheapest-row helpers (kept from previous builds)
+  // ---------- Cheapest row helpers ----------
   let lastCheapestRow=null;
   function pickCheapestRow(rows){
     let best=null, bestPrice=Infinity;
@@ -247,6 +262,7 @@
     if (row){ row.classList.add('im-cheapest-row'); lastCheapestRow=row; }
   }
 
+  // ---------- Main refresh ----------
   async function updateAll(){
     if (!isMarketPage()) return;
     const rows=findRows();
@@ -254,24 +270,21 @@
     markCheapest(cheapest);
 
     const wallet=await getWallet();
-
     for (const row of rows){
       const unitPrice=parseMoney(row.querySelector(SEL.price)?.textContent);
-      const qty=toInt(row.querySelector(SEL.qty)?.textContent);
+      const qty=toInt(row.querySelector(SEL.qtyText)?.textContent);
       const afford=computeAfford(wallet, unitPrice, qty);
       ensureAffordBadge(row, afford);
-      ensureBuyMaxButton(row);           // <-- new per-row button
+      ensureFillMax(row);
+      ensureBuyMaxButton(row);
     }
   }
 
-  const start=()=>{
-    setTimeout(updateAll,200);
-    setTimeout(updateAll,800);
-    const mo=new MutationObserver(()=>{ if (start._raf) cancelAnimationFrame(start._raf);
-      start._raf=requestAnimationFrame(()=>setTimeout(updateAll,30)); });
-    mo.observe(document.documentElement,{childList:true,subtree:true});
-    setInterval(updateAll,4000);
-  };
-
-  if (isMarketPage()) start();
+  // ---------- Observe & kick ----------
+  const mo=new MutationObserver(()=>{ if (mo._raf) cancelAnimationFrame(mo._raf);
+    mo._raf=requestAnimationFrame(()=>setTimeout(updateAll,30)); });
+  mo.observe(document.documentElement,{childList:true,subtree:true});
+  setTimeout(updateAll,200);
+  setTimeout(updateAll,800);
+  setInterval(updateAll,4000);
 })();
