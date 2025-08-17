@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Cooldown & OC Sentinel
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
-// @description  PDA-friendly sentinel with full-screen flashing overlays and modal acknowledge: Drug CD (0), Booster CD (<=20h), Education finish, Bank investment finish, and OC finished/not in OC. Overlay is click-through; modal captures clicks. Public API key only.
+// @version      1.1.1
+// @description  PDA-friendly sentinel with semi-transparent fullscreen flashing overlays + modal Acknowledge: Drug CD (0), Booster CD (<=20h), Education finish, Bank investment finish, and OC finished/not in OC. Overlay is click-through; modal captures clicks. Public API key only. OC status read from any Torn page DOM (no extra scopes). Minimizable control panel.
 // @author       BazookaJoe
 // @match        https://www.torn.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
@@ -18,75 +18,80 @@
 (function () {
   'use strict';
 
-  // -----------------------------
-  // Config (tweak as desired)
-  // -----------------------------
-  const CHECK_INTERVAL_MS = 30_000;         // API poll cadence
-  const OC_CHECK_INTERVAL_MS = 60_000;      // Faction page poll cadence (for OC status)
-  const FLASH_INTERVAL_MS = 1_000;          // Overlay flash speed
-  const ACK_SNOOZE_MS = 5 * 60_000;         // Snooze per alert after acknowledge (5 min)
-  const BOOSTER_ALERT_THRESHOLD_S = 20 * 3600; // 20 hours (alert when <= this)
+  // =========================
+  // Config
+  // =========================
+  const CHECK_INTERVAL_MS = 30_000;               // API poll cadence
+  const OC_DOM_SCAN_INTERVAL_MS = 10_000;         // DOM scan cadence for OC
+  const FLASH_INTERVAL_MS = 800;                  // overlay flash speed
+  const ACK_SNOOZE_MS = 5 * 60_000;               // 5 min per-alert snooze
+  const BOOSTER_ALERT_THRESHOLD_S = 20 * 3600;    // 20 hours
+  const NOT_IN_OC_ALERT_COOLDOWN_MS = 30 * 60_000;// 30 min between "not in OC" alerts
+
   const STORAGE = {
-    apiKey: 'torn_api_key',
+    apiKey: 'tcos_api_key',
     toggles: 'tcos_toggles_v1',
     snoozeUntil: 'tcos_snooze_until_v1',
     lastStates: 'tcos_last_states_v1',
     panelPos: 'tcos_panel_pos_v1',
+    minimized: 'tcos_panel_min_v1',
   };
 
-  // Alert keys (used for toggles/snoozes/colors/messages)
+  // Alerts + colors (now semi-transparent)
   const ALERTS = {
-    drug:   { key: 'drug',   label: 'Drug cooldown',            color: '#27ae60' }, // green
-    booster:{ key: 'booster',label: 'Booster cooldown (≤20h)',  color: '#2980b9' }, // blue
-    edu:    { key: 'edu',    label: 'Education finished',       color: '#8e44ad' }, // purple
-    bank:   { key: 'bank',   label: 'Bank investment finished', color: '#f39c12' }, // orange
-    oc:     { key: 'oc',     label: 'OC finished / Not in OC',  color: '#c0392b' }, // red
+    drug:   { key: 'drug',   label: 'Drug cooldown',            color: 'rgba(39,174,96,0.5)'  }, // green
+    booster:{ key: 'booster',label: 'Booster cooldown (≤20h)',  color: 'rgba(41,128,185,0.5)' }, // blue
+    edu:    { key: 'edu',    label: 'Education finished',       color: 'rgba(142,68,173,0.5)' }, // purple
+    bank:   { key: 'bank',   label: 'Bank investment finished', color: 'rgba(243,156,18,0.5)' }, // orange
+    oc:     { key: 'oc',     label: 'OC finished / Not in OC',  color: 'rgba(192,57,43,0.5)'  }, // red
   };
+  const DEFAULT_TOGGLES = { drug:true, booster:true, edu:true, bank:true, oc:true };
 
-  const DEFAULT_TOGGLES = {
-    drug: true,
-    booster: true,
-    edu:   true,
-    bank:  true,
-    oc:    true,
-  };
-
-  // -----------------------------
+  // =========================
   // State
-  // -----------------------------
+  // =========================
   let API_KEY = '';
-  let mainTimer = null;
-  let ocTimer = null;
-  let flashTimer = null;
-  let flashOn = false;
-
-  // in-memory mirrors (persisted via GM_*):
-  // toggles: {alertKey: bool}
-  // snoozeUntil: {alertKey: timestampMS}
-  // lastStates: {e.g., boosterSeconds, eduActive, bankActive, ocInProgress, ocEndEpoch}
   let toggles = {};
   let snoozeUntil = {};
   let lastStates = {};
+  let mainTimer = null;
+  let ocDomTimer = null;
+  let flashTimer = null;
+  let flashOn = false;
+  let currentAlertKey = null;
 
-  // -----------------------------
-  // Styles (overlay is click-through; modal captures input)
-  // -----------------------------
+  // =========================
+  // Helpers
+  // =========================
+  const pad2 = (n) => String(n).padStart(2, '0');
+  function formatHMS(sec) {
+    if (!Number.isFinite(sec) || sec < 0) sec = 0;
+    const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = Math.floor(sec%60);
+    return `${pad2(h)}:${pad2(m)}:${pad2(s)}`;
+  }
+  const withinSnooze = (k) => Date.now() < (snoozeUntil[k] || 0);
+  function setSnooze(k, ms = ACK_SNOOZE_MS) { snoozeUntil[k] = Date.now() + ms; persist(); }
+  function clearSnooze(k){ snoozeUntil[k] = 0; }
+
+  // =========================
+  // Styles
+  // =========================
   GM_addStyle(`
-    /* Fullscreen flashing overlay (pointer-events none = click-through) */
+    /* Fullscreen flashing overlay (click-through) */
     #tcos-overlay {
       position: fixed; inset: 0;
-      background: rgba(0,0,0,0.0);
+      background: rgba(0,0,0,0);
       z-index: 2147483646;
       pointer-events: none;
       transition: background-color 150ms linear;
     }
-    /* Modal wrapper (captures clicks) */
+    /* Modal (captures clicks) */
     #tcos-modal-wrap {
       position: fixed; inset: 0;
       display: none;
       align-items: center; justify-content: center;
       z-index: 2147483647;
-      pointer-events: none; /* pass through except the modal itself */
+      pointer-events: none;
     }
     #tcos-modal {
       pointer-events: auto;
@@ -95,55 +100,64 @@
       color: #fff; border-radius: 14px;
       padding: 14px 16px;
       box-shadow: 0 8px 30px rgba(0,0,0,0.5);
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans";
     }
     #tcos-modal h3 { margin: 0 0 8px; font-size: 18px; }
     #tcos-modal p  { margin: 6px 0 12px; line-height: 1.35; font-size: 14px; opacity: 0.9; }
     #tcos-modal .row { display:flex; gap:8px; flex-wrap: wrap; }
-    #tcos-modal .btn {
-      user-select:none; cursor:pointer;
-      border:0; border-radius:10px; padding:10px 12px;
-      background:#2ecc71; color:#111; font-weight:700; font-size: 14px;
-    }
+    #tcos-modal .btn { cursor:pointer; border:0; border-radius:10px; padding:10px 12px; background:#2ecc71; color:#111; font-weight:700; font-size:14px; }
     #tcos-modal .btn.secondary { background:#bdc3c7; }
     #tcos-modal .why { font-size:12px; opacity:0.8; margin-top:4px; }
 
-    /* PDA-friendly, draggable control panel */
+    /* Panel + minimised tab */
     #tcos-panel {
       position: fixed; bottom: 16px; left: 16px;
       width: 320px; max-width: 95vw;
       background: rgba(0,0,0,0.85);
       color: #eee; border: 1px solid #444; border-radius: 14px;
-      z-index: 2147483645;
-      backdrop-filter: blur(4px);
+      z-index: 2147483645; backdrop-filter: blur(4px);
       touch-action: none;
     }
-    #tcos-head {
-      display:flex; align-items:center; justify-content: space-between;
-      padding: 8px 10px; cursor: move; gap: 8px;
-      background: rgba(255,255,255,0.06);
-      border-top-left-radius: 14px; border-top-right-radius: 14px;
-    }
-    #tcos-title { font-weight: 800; font-size: 14px; }
-    #tcos-toggle { appearance:none; width:44px; height:26px; border-radius: 26px; background:#777; position:relative; outline:none; cursor:pointer; }
+    #tcos-head { display:flex; align-items:center; justify-content: space-between; padding:8px 10px; cursor: move; gap:8px; background: rgba(255,255,255,0.06); border-top-left-radius:14px; border-top-right-radius:14px; }
+    #tcos-title { font-weight:800; font-size:14px; }
+    #tcos-toggle { appearance:none; width:44px; height:26px; border-radius:26px; background:#777; position:relative; outline:none; cursor:pointer; }
     #tcos-toggle:checked { background:#2ecc71; }
-    #tcos-toggle::after{
-      content:""; position:absolute; top:3px; left:3px; width:20px; height:20px; border-radius:50%;
-      background:#fff; transition:left 150ms ease;
-    }
+    #tcos-toggle::after{ content:""; position:absolute; top:3px; left:3px; width:20px; height:20px; border-radius:50%; background:#fff; transition:left 150ms ease; }
     #tcos-toggle:checked::after{ left:21px; }
-    #tcos-body { padding:10px; display:grid; gap:10px; grid-template-columns: 1fr 1fr; }
+
+    #tcos-body { padding:10px; display:grid; gap:10px; grid-template-columns:1fr 1fr; }
     #tcos-body label { display:flex; gap:6px; align-items:center; font-size:13px; }
-    #tcos-body input[type="checkbox"] { transform: scale(1.1); }
-    #tcos-body .full { grid-column: 1 / -1; }
-    #tcos-body input[type="text"]{
-      width:100%; padding:8px 10px; border-radius:10px; border:1px solid #555; background:#111; color:#eee; font-size:13px;
-    }
-    #tcos-foot { padding: 8px 10px; display:flex; gap:8px; justify-content:flex-end; border-top: 1px solid #333; }
-    #tcos-foot .btn { cursor:pointer; border:0; border-radius:10px; padding:8px 10px; background:#3498db; color:#fff; font-weight:700; font-size: 13px; }
+    #tcos-body .full { grid-column:1 / -1; }
+    #tcos-body input[type="checkbox"]{ transform:scale(1.1); }
+    #tcos-body input[type="text"]{ width:100%; padding:8px 10px; border-radius:10px; border:1px solid #555; background:#111; color:#eee; font-size:13px; }
+
+    #tcos-foot { padding:8px 10px; display:flex; gap:8px; justify-content:flex-end; border-top:1px solid #333; flex-wrap: wrap; }
+    #tcos-foot .btn { cursor:pointer; border:0; border-radius:10px; padding:8px 10px; background:#3498db; color:#fff; font-weight:700; font-size:13px; }
     #tcos-foot .btn.ghost { background:#555; }
 
-    /* Small pill timers */
+    /* Tests menu (compact) */
+    #tcos-tests-wrap { position: relative; }
+    #tcos-tests-menu {
+      position: absolute; right:0; bottom: 34px;
+      display:none; min-width: 180px;
+      background: rgba(20,20,20,0.98); border:1px solid #444; border-radius:10px; padding:6px;
+      z-index: 2147483648;
+    }
+    #tcos-tests-menu button { width:100%; text-align:left; margin:2px 0; }
+
+    /* Minimise tab */
+    #tcos-minitab {
+      position: fixed; left:0; top: 40%;
+      transform: translateY(-50%);
+      padding:10px 6px;
+      background: rgba(0,0,0,0.85); color:#fff; border-top-right-radius:10px; border-bottom-right-radius:10px;
+      border:1px solid #444; border-left: 0;
+      z-index: 2147483645; cursor:pointer;
+      font-weight:800; font-size:12px; writing-mode: vertical-rl; text-orientation: mixed;
+      display:none; user-select:none;
+    }
+
+    /* Status pill */
     .tcos-pill {
       position: fixed; right: 10px; bottom: 10px;
       min-width: 120px; padding: 6px 10px; border-radius: 10px;
@@ -152,18 +166,17 @@
     }
     .tcos-pill span { display:inline-block; min-width: 60px; text-align: right; }
 
-    /* Accessible focus */
     #tcos-panel button:focus, #tcos-panel input:focus, #tcos-modal .btn:focus { outline: 2px solid #fff; outline-offset: 2px; }
   `);
 
-  // -----------------------------
-  // UI Elements
-  // -----------------------------
-  const overlay = document.createElement('div');      // click-through color flash
+  // =========================
+  // DOM: overlay + modal
+  // =========================
+  const overlay = document.createElement('div');
   overlay.id = 'tcos-overlay';
   document.body.appendChild(overlay);
 
-  const modalWrap = document.createElement('div');    // modal container
+  const modalWrap = document.createElement('div');
   modalWrap.id = 'tcos-modal-wrap';
   modalWrap.innerHTML = `
     <div id="tcos-modal" role="dialog" aria-modal="true" aria-labelledby="tcos-title-h3">
@@ -177,14 +190,14 @@
     </div>
   `;
   document.body.appendChild(modalWrap);
-
-  const modal = modalWrap.querySelector('#tcos-modal');
   const msgEl = modalWrap.querySelector('#tcos-msg');
   const whyEl = modalWrap.querySelector('#tcos-why');
   const ackBtn = modalWrap.querySelector('#tcos-ack');
   const ackSnoozeBtn = modalWrap.querySelector('#tcos-ack-snooze');
 
-  // Draggable panel
+  // =========================
+  // Control Panel + Minimise
+  // =========================
   const panel = document.createElement('div');
   panel.id = 'tcos-panel';
   panel.innerHTML = `
@@ -198,24 +211,34 @@
       <label><input type="checkbox" id="tcos-edu"> Education</label>
       <label><input type="checkbox" id="tcos-bank"> Bank</label>
       <label class="full"><input type="checkbox" id="tcos-oc"> OC finished / Not in OC</label>
-
       <div class="full">
         <label for="tcos-key" style="display:block;margin-bottom:4px;">Public API Key</label>
         <input id="tcos-key" type="text" placeholder="Paste your Public API key">
       </div>
     </div>
     <div id="tcos-foot">
-      <button class="btn ghost" id="tcos-test-drug">Test Drug</button>
-      <button class="btn ghost" id="tcos-test-booster">Test Booster</button>
-      <button class="btn ghost" id="tcos-test-edu">Test Edu</button>
-      <button class="btn ghost" id="tcos-test-bank">Test Bank</button>
-      <button class="btn ghost" id="tcos-test-oc">Test OC</button>
+      <div id="tcos-tests-wrap">
+        <button class="btn ghost" id="tcos-tests-btn">Tests ▾</button>
+        <div id="tcos-tests-menu" role="menu" aria-label="Test alerts">
+          <button class="btn ghost" id="tcos-test-drug">Test Drug</button>
+          <button class="btn ghost" id="tcos-test-booster">Test Booster</button>
+          <button class="btn ghost" id="tcos-test-edu">Test Edu</button>
+          <button class="btn ghost" id="tcos-test-bank">Test Bank</button>
+          <button class="btn ghost" id="tcos-test-oc">Test OC</button>
+        </div>
+      </div>
+      <button class="btn ghost" id="tcos-min">Minimise</button>
       <button class="btn" id="tcos-save">Save</button>
     </div>
   `;
   document.body.appendChild(panel);
 
-  // Tiny status pills (for quick glance)
+  const miniTab = document.createElement('div');
+  miniTab.id = 'tcos-minitab';
+  miniTab.textContent = 'Sentinel';
+  document.body.appendChild(miniTab);
+
+  // Status pill
   const pill = document.createElement('div');
   pill.className = 'tcos-pill';
   pill.style.display = 'none';
@@ -228,6 +251,7 @@
   `;
   document.body.appendChild(pill);
 
+  // Shortcuts
   const qs = (id) => document.getElementById(id);
   const masterToggle = qs('tcos-toggle');
   const keyInput = qs('tcos-key');
@@ -237,27 +261,18 @@
   const bankToggle = qs('tcos-bank');
   const ocToggle = qs('tcos-oc');
 
-  // -----------------------------
-  // Helpers
-  // -----------------------------
-  const pad2 = (n) => String(n).padStart(2, '0');
-  function formatHMS(totalSeconds) {
-    if (totalSeconds < 0 || !Number.isFinite(totalSeconds)) totalSeconds = 0;
-    const h = Math.floor(totalSeconds / 3600);
-    const m = Math.floor((totalSeconds % 3600) / 60);
-    const s = Math.floor(totalSeconds % 60);
-    return `${pad2(h)}:${pad2(m)}:${pad2(s)}`;
-  }
-
+  // =========================
+  // Persist
+  // =========================
   async function loadPersisted() {
     API_KEY = await GM_getValue(STORAGE.apiKey, '');
     toggles = await GM_getValue(STORAGE.toggles, { ...DEFAULT_TOGGLES });
     snoozeUntil = await GM_getValue(STORAGE.snoozeUntil, {});
     lastStates = await GM_getValue(STORAGE.lastStates, {});
     const pos = await GM_getValue(STORAGE.panelPos, null);
+    const min = await GM_getValue(STORAGE.minimized, false);
 
     keyInput.value = API_KEY || '';
-
     drugToggle.checked = !!toggles.drug;
     boosterToggle.checked = !!toggles.booster;
     eduToggle.checked = !!toggles.edu;
@@ -270,8 +285,8 @@
       panel.style.bottom = 'auto';
       panel.style.right = 'auto';
     }
+    setMinimised(min);
   }
-
   async function persist() {
     await GM_setValue(STORAGE.apiKey, API_KEY);
     await GM_setValue(STORAGE.toggles, toggles);
@@ -279,42 +294,22 @@
     await GM_setValue(STORAGE.lastStates, lastStates);
   }
 
-  function withinSnooze(alertKey) {
-    const until = snoozeUntil[alertKey] || 0;
-    return Date.now() < until;
-  }
-
-  function setSnooze(alertKey, ms = ACK_SNOOZE_MS) {
-    snoozeUntil[alertKey] = Date.now() + ms;
-    persist();
-  }
-
-  function clearSnooze(alertKey) {
-    snoozeUntil[alertKey] = 0;
-  }
-
-  // -----------------------------
-  // Overlay / Modal controls
-  // -----------------------------
-  let currentAlertKey = null;
-
-  function startFlash(color, reason, heading = 'Attention') {
-    // Set modal content
-    msgEl.textContent = heading;
+  // =========================
+  // Flash / Modal
+  // =========================
+  function startFlash(color, reason, heading) {
+    msgEl.textContent = heading || 'Attention';
     whyEl.textContent = reason || '';
-    // Show modal (captures clicks), overlay flashes behind and is click-through
     modalWrap.style.display = 'flex';
 
-    // Start color flashing
     overlay.style.background = 'transparent';
-    flashOn = false;
     if (flashTimer) clearInterval(flashTimer);
+    flashOn = false;
     flashTimer = setInterval(() => {
       flashOn = !flashOn;
       overlay.style.backgroundColor = flashOn ? color : 'rgba(0,0,0,0.0)';
     }, FLASH_INTERVAL_MS);
   }
-
   function stopFlash() {
     if (flashTimer) clearInterval(flashTimer);
     flashTimer = null;
@@ -322,140 +317,63 @@
     overlay.style.background = 'transparent';
     modalWrap.style.display = 'none';
   }
-
+  function raiseAlert(alertKey, reasonText) {
+    if (!toggles[alertKey]) return;
+    if (withinSnooze(alertKey)) return;
+    currentAlertKey = alertKey;
+    const { color, label } = ALERTS[alertKey];
+    startFlash(color, reasonText, label);
+  }
   ackBtn.addEventListener('click', () => {
-    if (currentAlertKey) {
-      clearSnooze(currentAlertKey); // acknowledge (no snooze) ends current and allows immediate re-alerts on new state
-      persist();
-    }
+    if (currentAlertKey) { clearSnooze(currentAlertKey); persist(); }
     stopFlash();
   });
-
   ackSnoozeBtn.addEventListener('click', () => {
     if (currentAlertKey) setSnooze(currentAlertKey);
     stopFlash();
   });
 
-  function raiseAlert(alertKey, reasonText) {
-    if (!toggles[alertKey]) return;
-    if (withinSnooze(alertKey)) return;
-
-    currentAlertKey = alertKey;
-    const { color, label } = ALERTS[alertKey];
-    startFlash(color, reasonText, label);
-  }
-
-  // -----------------------------
-  // API Calls
-  // -----------------------------
+  // =========================
+  // API: cooldowns/edu/bank (Public key)
+  // =========================
   function apiGet(selections) {
     if (!API_KEY) return Promise.reject(new Error('No API key'));
     const url = `https://api.torn.com/user/?selections=${encodeURIComponent(selections)}&key=${encodeURIComponent(API_KEY)}`;
     return new Promise((resolve, reject) => {
       GM.xmlHttpRequest({
-        method: 'GET',
-        url,
+        method: 'GET', url,
         onload: (res) => {
           try {
             const data = JSON.parse(res.responseText);
             if (data?.error) return reject(new Error(data.error.error));
             resolve(data);
-          } catch (e) {
-            reject(e);
-          }
+          } catch (e) { reject(e); }
         },
         onerror: (e) => reject(e),
       });
     });
   }
 
-  // Organized Crime status scraping from faction page (no extra API scopes)
-  async function readOCStatus() {
-    try {
-      const resp = await fetch('/factions.php?step=your', { credentials: 'same-origin' });
-      const html = await resp.text();
-
-      // Quick text heuristics to reduce DOM coupling:
-      const lower = html.toLowerCase();
-
-      // Common phrases:
-      const notInOCPhrases = [
-        'you are not currently in an organized crime',
-        'you are not currently in an organised crime',
-        'no organized crime in progress',
-        'no organised crime in progress',
-      ];
-      let notInOC = notInOCPhrases.some(p => lower.includes(p));
-
-      // Try to find a time remaining (look for data-timer or hh:mm:ss-ish)
-      // Simplistic search for something like data-timer or countdown strings
-      let inProgress = false;
-      let secondsLeft = null;
-
-      // data-timer="12345"
-      const timerAttr = html.match(/data-timer\s*=\s*["'](\d+)["']/i);
-      if (timerAttr) {
-        inProgress = true;
-        secondsLeft = parseInt(timerAttr[1], 10);
-      }
-
-      // fallback: look for xx:xx(:xx) patterns near "organized crime"
-      if (!inProgress) {
-        const ocBlock = lower.indexOf('organized crime') >= 0 ? lower.indexOf('organized crime') : lower.indexOf('organised crime');
-        if (ocBlock >= 0) {
-          const slice = html.slice(Math.max(0, ocBlock - 500), Math.min(html.length, ocBlock + 800));
-          const hhmmss = slice.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
-          if (hhmmss) {
-            inProgress = true;
-            const h = parseInt(hhmmss[1] || '0', 10);
-            const m = parseInt(hhmmss[2] || '0', 10);
-            const s = parseInt(hhmmss[3] || '0', 10);
-            secondsLeft = (h * 3600) + (m * 60) + (isNaN(s) ? 0 : s);
-          }
-        }
-      }
-
-      if (inProgress) {
-        return { inProgress: true, secondsLeft: Number.isFinite(secondsLeft) ? secondsLeft : null };
-      }
-      if (notInOC) return { inProgress: false, secondsLeft: null };
-
-      // Unknown (don’t spam—treat as unchanged)
-      return { inProgress: lastStates.ocInProgress ?? false, secondsLeft: lastStates.ocSecondsLeft ?? null };
-    } catch {
-      // On errors, keep last known
-      return { inProgress: lastStates.ocInProgress ?? false, secondsLeft: lastStates.ocSecondsLeft ?? null };
-    }
-  }
-
-  // -----------------------------
-  // Main polling
-  // -----------------------------
   async function checkAll() {
     if (!masterToggle.checked) return;
 
-    // Fetch cooldowns + edu + bank in two calls to reduce rate:
-    // cooldowns
+    // Cooldowns
     try {
       if (API_KEY && (toggles.drug || toggles.booster)) {
         const cd = await apiGet('cooldowns');
         const drugS = cd?.cooldowns?.drug ?? 0;
         const boosterS = cd?.cooldowns?.booster ?? 0;
 
-        // Update pills
         qs('pill-drug').textContent = formatHMS(drugS);
         qs('pill-booster').textContent = formatHMS(boosterS);
 
         // Drug finished
-        if (toggles.drug && drugS === 0) {
-          if ((lastStates.drugS ?? 1) !== 0) {
-            // transitioned to 0
-            if (!withinSnooze('drug')) raiseAlert('drug', 'Drug cooldown is now 0.');
-          }
+        if (toggles.drug && drugS === 0 && (lastStates.drugS ?? 1) !== 0) {
+          if (!withinSnooze('drug')) raiseAlert('drug', 'Drug cooldown is now 0.');
         }
-        // Booster ≤ 20h (but not negative)
+
+        // Booster threshold cross (only alert as we go from >20h to <=20h)
         if (toggles.booster && boosterS > 0 && boosterS <= BOOSTER_ALERT_THRESHOLD_S) {
-          // Only alert once as we cross the threshold downward
           const wasAbove = (lastStates.boosterS ?? (BOOSTER_ALERT_THRESHOLD_S + 1)) > BOOSTER_ALERT_THRESHOLD_S;
           if (wasAbove && !withinSnooze('booster')) {
             raiseAlert('booster', `Booster cooldown ≤ 20 hours (${formatHMS(boosterS)} remaining).`);
@@ -465,11 +383,9 @@
         lastStates.drugS = drugS;
         lastStates.boosterS = boosterS;
       }
-    } catch (e) {
-      // ignore soft errors
-    }
+    } catch {}
 
-    // education + bank
+    // Education + Bank
     try {
       if (API_KEY && (toggles.edu || toggles.bank)) {
         const [edu, money] = await Promise.allSettled([
@@ -477,13 +393,11 @@
           toggles.bank ? apiGet('money') : Promise.resolve(null),
         ]);
 
-        // Education
         if (toggles.edu && edu.status === 'fulfilled') {
-          const timeLeft = edu.value?.education_timeleft ?? 0; // seconds
+          const timeLeft = edu.value?.education_timeleft ?? 0;
           const active = (edu.value?.education_current ?? 0) > 0 || timeLeft > 0;
           qs('pill-edu').textContent = active ? formatHMS(timeLeft) : 'idle';
 
-          // finished transition (was active, now 0)
           if ((lastStates.eduActive ?? false) && timeLeft === 0) {
             if (!withinSnooze('edu')) raiseAlert('edu', 'Education course finished.');
           }
@@ -491,10 +405,9 @@
           lastStates.eduTimeLeft = timeLeft;
         }
 
-        // Bank
         if (toggles.bank && money.status === 'fulfilled') {
           const bank = money.value?.bank || {};
-          const bankTimeLeft = bank?.time_left ?? 0; // seconds
+          const bankTimeLeft = bank?.time_left ?? 0;
           const bankActive = (bank?.amount ?? 0) > 0 && bankTimeLeft >= 0;
           qs('pill-bank').textContent = bankActive ? formatHMS(bankTimeLeft) : 'idle';
 
@@ -505,59 +418,114 @@
           lastStates.bankTimeLeft = bankTimeLeft;
         }
       }
-    } catch (e) {
-      // ignore
-    }
+    } catch {}
 
-    // Pills visible only when master on
     pill.style.display = masterToggle.checked ? 'block' : 'none';
-
     await persist();
   }
 
-  async function checkOC() {
-    if (!masterToggle.checked || !toggles.oc) return;
-    const { inProgress, secondsLeft } = await readOCStatus();
+  // =========================
+  // OC from ANY page (DOM)
+  // =========================
+  // Heuristics:
+  // 1) If we find an OC timer/icon globally (header/toolbar widgets often include a data-timer),
+  //    treat as "in progress" and show remaining.
+  // 2) If no OC UI elements are found for multiple scans, treat as "not in OC"
+  //    but rate-limit alerts to avoid false positives.
+  // 3) If a countdown reaches 0 -> alert "OC finished".
+  let ocUnknownStreak = 0;
+  const OC_UNKNOWN_STREAK_MAX = 3; // ~30s at 10s cadence before concluding "not in OC"
 
-    // Update pill
-    if (inProgress) {
-      qs('pill-oc').textContent = secondsLeft != null ? formatHMS(secondsLeft) : '…';
-    } else {
-      qs('pill-oc').textContent = 'not in OC';
-    }
+  function scanOCDom() {
+    // Look for a generic OC widget:
+    // - elements with title/tooltips mentioning Organized Crime or OC
+    // - data-timer attributes adjacent to OC labels
+    const body = document.body;
+    const textCandidates = Array.from(body.querySelectorAll('[title],[aria-label],[data-title]'));
+    const matchText = (s) => /organized\s*crime|organised\s*crime|\bOC\b/i.test(s || '');
 
-    // Transition logic:
-    const wasIn = !!lastStates.ocInProgress;
-    if (wasIn && (!inProgress || (secondsLeft === 0))) {
-      // finished
-      if (!withinSnooze('oc')) raiseAlert('oc', inProgress ? 'OC finished.' : 'You are no longer in an OC.');
-    }
-    if (!wasIn && !inProgress) {
-      // alert when not in OC (entering "not in OC" state), but avoid spamming
-      const lastMark = lastStates.ocNotInOcAlertedAt || 0;
-      if (Date.now() - lastMark > 30 * 60_000 && !withinSnooze('oc')) {
-        raiseAlert('oc', 'You are not in an OC.');
-        lastStates.ocNotInOcAlertedAt = Date.now();
+    let ocNode = textCandidates.find(el => matchText(el.getAttribute('title') || el.getAttribute('aria-label') || el.getAttribute('data-title')));
+    if (!ocNode) {
+      // fallback: scan common header toolbars for “OC” text
+      const header = document.querySelector('#header, .header, .toolbar, #top-page, .content-wrapper') || body;
+      const walker = document.createTreeWalker(header, NodeFilter.SHOW_TEXT, null);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (matchText(node.nodeValue)) { ocNode = node.parentElement; break; }
       }
     }
 
-    lastStates.ocInProgress = inProgress;
-    lastStates.ocSecondsLeft = secondsLeft;
-    await persist();
+    // Try to find a timer value nearby (data-timer, or a hh:mm(:ss))
+    let secondsLeft = null;
+    let inProgress = false;
+
+    if (ocNode) {
+      // search up to a small subtree around ocNode
+      const scope = ocNode.closest('*') || ocNode;
+      const candidateTimers = Array.from(scope.querySelectorAll('[data-timer], [data-time-left], [data-countdown], time, span, div'));
+      for (const el of candidateTimers) {
+        const dt = el.getAttribute && (el.getAttribute('data-timer') || el.getAttribute('data-time-left') || el.getAttribute('data-countdown'));
+        if (dt && /^\d+$/.test(dt)) {
+          secondsLeft = parseInt(dt, 10);
+          inProgress = secondsLeft > 0;
+          break;
+        }
+        const txt = (el.textContent || '').trim();
+        const m = txt.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+        if (m) {
+          const h = parseInt(m[1], 10), mi = parseInt(m[2], 10), s = parseInt(m[3] || '0', 10);
+          secondsLeft = h * 3600 + mi * 60 + (isNaN(s) ? 0 : s);
+          inProgress = secondsLeft > 0;
+          break;
+        }
+      }
+    }
+
+    if (inProgress) {
+      ocUnknownStreak = 0;
+      qs('pill-oc').textContent = formatHMS(secondsLeft ?? 0);
+
+      // Finished transition
+      const wasIn = !!lastStates.ocInProgress;
+      if (wasIn && (secondsLeft === 0)) {
+        if (!withinSnooze('oc')) raiseAlert('oc', 'OC finished.');
+      }
+      lastStates.ocInProgress = true;
+      lastStates.ocSecondsLeft = Number.isFinite(secondsLeft) ? secondsLeft : lastStates.ocSecondsLeft ?? null;
+      return;
+    }
+
+    // No visible OC widget detected
+    ocUnknownStreak++;
+    if (ocUnknownStreak >= OC_UNKNOWN_STREAK_MAX) {
+      const wasIn = !!lastStates.ocInProgress;
+      qs('pill-oc').textContent = 'not in OC';
+      if (!wasIn) {
+        // Rate-limit "not in OC"
+        const last = lastStates.ocNotInOcAlertedAt || 0;
+        if (Date.now() - last > NOT_IN_OC_ALERT_COOLDOWN_MS && !withinSnooze('oc')) {
+          raiseAlert('oc', 'You are not in an OC.');
+          lastStates.ocNotInOcAlertedAt = Date.now();
+        }
+      }
+      lastStates.ocInProgress = false;
+      lastStates.ocSecondsLeft = null;
+    } else {
+      // transient unknown
+      qs('pill-oc').textContent = '…';
+    }
   }
 
-  // -----------------------------
-  // Draggable panel (touch + mouse)
-  // -----------------------------
+  // =========================
+  // Draggable + Minimise
+  // =========================
   (function makeDraggable() {
-    const head = qs('tcos-head');
-    let dragging = false;
-    let startX = 0, startY = 0;
-    let rect = null;
+    const head = document.getElementById('tcos-head');
+    let dragging = false, startX = 0, startY = 0;
 
     function onDown(e) {
       dragging = true;
-      rect = panel.getBoundingClientRect();
+      const rect = panel.getBoundingClientRect();
       startX = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
       startY = (e.touches ? e.touches[0].clientY : e.clientY) - rect.top;
       e.preventDefault();
@@ -568,8 +536,7 @@
       const y = (e.touches ? e.touches[0].clientY : e.clientY) - startY;
       panel.style.left = `${Math.max(4, Math.min(window.innerWidth - panel.offsetWidth - 4, x))}px`;
       panel.style.top  = `${Math.max(4, Math.min(window.innerHeight - panel.offsetHeight - 4, y))}px`;
-      panel.style.right = 'auto';
-      panel.style.bottom = 'auto';
+      panel.style.right = 'auto'; panel.style.bottom = 'auto';
     }
     async function onUp() {
       if (!dragging) return;
@@ -579,19 +546,33 @@
         y: parseInt(panel.style.top  || (window.innerHeight - panel.offsetHeight - 16), 10),
       });
     }
-
     head.addEventListener('mousedown', onDown);
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
-
-    head.addEventListener('touchstart', onDown, { passive: false });
-    window.addEventListener('touchmove', onMove, { passive: false });
+    head.addEventListener('touchstart', onDown, { passive:false });
+    window.addEventListener('touchmove', onMove, { passive:false });
     window.addEventListener('touchend', onUp);
   })();
 
-  // -----------------------------
-  // Event wiring
-  // -----------------------------
+  function setMinimised(min) {
+    if (min) {
+      panel.style.display = 'none';
+      miniTab.style.display = 'block';
+      GM_setValue(STORAGE.minimized, true);
+    } else {
+      panel.style.display = 'block';
+      miniTab.style.display = 'none';
+      GM_setValue(STORAGE.minimized, false);
+    }
+  }
+
+  qs('tcos-min').addEventListener('click', () => setMinimised(true));
+  miniTab.addEventListener('click', () => setMinimised(false));
+
+  // =========================
+  // Events
+  // =========================
+  // Save
   qs('tcos-save').addEventListener('click', async () => {
     API_KEY = keyInput.value.trim();
     toggles = {
@@ -602,16 +583,15 @@
       oc: !!ocToggle.checked,
     };
     await persist();
-    if (API_KEY && !mainTimer) {
-      mainTimer = setInterval(checkAll, CHECK_INTERVAL_MS);
-      checkAll();
-    }
-    if (!ocTimer) {
-      ocTimer = setInterval(checkOC, OC_CHECK_INTERVAL_MS);
-      checkOC();
-    }
+
+    if (API_KEY && !mainTimer) mainTimer = setInterval(checkAll, CHECK_INTERVAL_MS);
+    checkAll();
+
+    if (!ocDomTimer) ocDomTimer = setInterval(scanOCDom, OC_DOM_SCAN_INTERVAL_MS);
+    scanOCDom();
   });
 
+  // Master toggle
   masterToggle.addEventListener('change', () => {
     if (!masterToggle.checked) {
       stopFlash();
@@ -619,32 +599,41 @@
     } else {
       pill.style.display = 'block';
       checkAll();
-      checkOC();
+      scanOCDom();
     }
   });
 
-  // Test buttons
-  qs('tcos-test-drug').addEventListener('click', () => { currentAlertKey = 'drug';  raiseAlert('drug',  'Test: Drug cooldown is now 0.'); });
-  qs('tcos-test-booster').addEventListener('click', () => { currentAlertKey = 'booster'; raiseAlert('booster','Test: Booster cooldown ≤ 20h.'); });
-  qs('tcos-test-edu').addEventListener('click', () => { currentAlertKey = 'edu';   raiseAlert('edu',   'Test: Education course finished.'); });
-  qs('tcos-test-bank').addEventListener('click', () => { currentAlertKey = 'bank';  raiseAlert('bank',  'Test: Bank investment finished.'); });
-  qs('tcos-test-oc').addEventListener('click', () => { currentAlertKey = 'oc';    raiseAlert('oc',    'Test: OC finished / Not in OC.'); });
+  // Tests compact menu
+  const testsBtn = qs('tcos-tests-btn');
+  const testsMenu = qs('tcos-tests-menu');
+  testsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    testsMenu.style.display = testsMenu.style.display === 'block' ? 'none' : 'block';
+  });
+  document.addEventListener('click', (e) => {
+    if (!testsMenu.contains(e.target) && e.target !== testsBtn) testsMenu.style.display = 'none';
+  });
 
-  // -----------------------------
+  // Test buttons
+  qs('tcos-test-drug').addEventListener('click', () => { currentAlertKey = 'drug';   raiseAlert('drug',   'Test: Drug cooldown is now 0.'); });
+  qs('tcos-test-booster').addEventListener('click', () => { currentAlertKey = 'booster';raiseAlert('booster','Test: Booster cooldown ≤ 20h.'); });
+  qs('tcos-test-edu').addEventListener('click', () => { currentAlertKey = 'edu';    raiseAlert('edu',    'Test: Education course finished.'); });
+  qs('tcos-test-bank').addEventListener('click', () => { currentAlertKey = 'bank';   raiseAlert('bank',   'Test: Bank investment finished.'); });
+  qs('tcos-test-oc').addEventListener('click', () => { currentAlertKey = 'oc';     raiseAlert('oc',     'Test: OC finished / Not in OC.'); });
+
+  // =========================
   // Init
-  // -----------------------------
+  // =========================
   (async function init() {
     await loadPersisted();
 
-    // Start timers if we can
     if (API_KEY) {
-      mainTimer = setInterval(checkAll, CHECK_INTERVAL_MS);
+      if (!mainTimer) mainTimer = setInterval(checkAll, CHECK_INTERVAL_MS);
       checkAll();
     }
-    ocTimer = setInterval(checkOC, OC_CHECK_INTERVAL_MS);
-    checkOC();
+    if (!ocDomTimer) ocDomTimer = setInterval(scanOCDom, OC_DOM_SCAN_INTERVAL_MS);
+    scanOCDom();
 
-    // Show pills if on
     pill.style.display = masterToggle.checked ? 'block' : 'none';
   })();
 
