@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Cooldown & OC Sentinel
 // @namespace    http://tampermonkey.net/
-// @version      1.4.0
+// @version      1.4.1
 // @description  Semi-transparent full-screen flash + modal acknowledge for: Drug (0), Booster (≤20h), Education finish, OC finished / Not in OC. PDA-friendly, draggable, minimisable (starts minimised). Single API key (Limited). Overlay is click-through; modal captures clicks. Author: BazookaJoe.
 // @author       BazookaJoe
 // @match        https://www.torn.com/*
@@ -22,14 +22,14 @@
   // =========================
   // Config
   // =========================
-  const POLL_MS = 30_000;
-  const TICK_MS = 1_000;
-  const OC_DOM_SCAN_MS = 10_000;
-  const FLASH_INTERVAL_MS = 800;
-  const SNOOZE_MS = 5 * 60_000;
-  const BOOSTER_THRESHOLD_S = 20 * 3600;
+  const POLL_MS = 3_600_000;            // 1 API sweep per hour
+  const TICK_MS = 1_000;                // local countdown tick
+  const OC_DOM_SCAN_MS = 10_000;        // lightweight DOM check for OC status
+  const FLASH_INTERVAL_MS = 800;        // overlay flash speed
+  const SNOOZE_MS = 5 * 60_000;         // Snooze 5m
+  const BOOSTER_THRESHOLD_S = 20 * 3600;// 20 hours
   const NOT_IN_OC_COOLDOWN_MS = 30 * 60_000;
-  const REATTACH_MS = 3_000;
+  const REATTACH_MS = 3_000;            // periodic self-heal
   const SAVE_DEBOUNCE_MS = 400;
 
   // Always start minimised each load; open via pill button
@@ -46,6 +46,7 @@
     pos: 'tcos_panel_pos_v1',
     pillPos: 'tcos_pill_pos_v1',
     minimized: 'tcos_panel_min_v1',
+    lastPoll: 'tcos_last_poll_v1',
   };
 
   const ALERTS = {
@@ -74,7 +75,7 @@
   const OC_UNKNOWN_STREAK_MAX = 3;
 
   // DOM refs
-  let overlay, modalWrap, msgEl, whyEl, ackBtn, ackSnoozeBtn;
+  let overlay, modalWrap, msgEl, whyEl;
   let panel, pill;
   let masterToggle, keyInput, drugToggle, boosterToggle, eduToggle, ocToggle;
   let testsBtn, testsMenu;
@@ -152,7 +153,7 @@
 
   // Build UI (idempotent)
   function ensureUI() {
-    // Hard-remove any legacy side tab from older builds
+    // Remove any legacy side tab from older builds
     const oldTab = document.getElementById('tcos-minitab');
     if (oldTab && oldTab.remove) oldTab.remove();
 
@@ -168,7 +169,6 @@
         </div>
       </div>`; safeAppend(w); return w;})();
     msgEl = qs('tcos-msg'); whyEl = qs('tcos-why');
-    ackBtn = qs('tcos-ack'); ackSnoozeBtn = qs('tcos-ack-snooze');
 
     panel = qs('tcos-panel') || (()=>{const p=document.createElement('div');p.id='tcos-panel';p.innerHTML=`
       <div id="tcos-head">
@@ -208,6 +208,7 @@
         <div class="row"><span>OC</span><span id="pill-oc">--</span></div>
       </div>`; safeAppend(s); return s;})();
 
+    // Shortcuts
     masterToggle = qs('tcos-toggle');
     keyInput = qs('tcos-key');
     drugToggle = qs('tcos-drug');
@@ -223,12 +224,10 @@
     bindOnce('tcos-save', 'click', onSave);
     bindOnce('tcos-min', 'click', () => setMinimised(true));
 
-    // Open UI from the pill's button
     if (pillOpenBtn && !pillOpenBtn.dataset.bound) {
       pillOpenBtn.addEventListener('click', (e)=>{ e.stopPropagation(); setMinimised(false); });
       pillOpenBtn.dataset.bound = '1';
     }
-
     if (!testsBtn.dataset.bound){
       testsBtn.addEventListener('click',(e)=>{e.stopPropagation();testsMenu.style.display=testsMenu.style.display==='block'?'none':'block';});
       document.addEventListener('click',(e)=>{ if(!testsMenu.contains(e.target) && e.target!==testsBtn) testsMenu.style.display='none';});
@@ -238,7 +237,6 @@
       qs('tcos-test-oc').addEventListener('click',()=>{currentAlertKey='oc';raiseAlert('oc','Test: OC finished / Not in OC.');});
       testsBtn.dataset.bound='1';
     }
-
     if (!masterToggle.dataset.bound){
       masterToggle.addEventListener('change',()=>{ if(!masterToggle.checked) stopFlash(); pill.style.display=masterToggle.checked?'block':'none';});
       masterToggle.dataset.bound='1';
@@ -249,7 +247,7 @@
 
     if (masterToggle.checked) pill.style.display = 'block';
 
-    // Save API key on type + blur AND update var immediately
+    // API key: save on type + blur
     if (!keyInput.dataset.bound) {
       const saveKey = debounce(async () => {
         API_KEY = keyInput.value.trim();
@@ -278,8 +276,11 @@
     const pos = await GM_getValue(STORAGE.pos, null);
     const pillPos = await GM_getValue(STORAGE.pillPos, null);
 
-    // Start minimised each load unless you open this session
     let min = true;
+    if (!FORCE_MIN_ON_LOAD) {
+      const stored = await GM_getValue(STORAGE.minimized, undefined);
+      min = (typeof stored === 'undefined') ? true : !!stored;
+    }
     await GM_setValue(STORAGE.minimized, min);
 
     keyInput.value = API_KEY || '';
@@ -332,24 +333,44 @@
     });
   }
 
-  // Server refresh
+  // Poll bookkeeping
+  async function markPolled() {
+    await GM_setValue(STORAGE.lastPoll, Date.now());
+  }
+  async function shouldPollNow() {
+    const lastPoll = await GM_getValue(STORAGE.lastPoll, 0);
+    return (Date.now() - lastPoll) >= POLL_MS;
+  }
+
+  // Server refresh (sets end-times)
   async function refreshFromServer() {
     if (!API_KEY) API_KEY = await GM_getValue(STORAGE.key, '');
     if (!masterToggle.checked || !API_KEY) return;
+
+    // If called by interval, we still respect the hourly schedule
+    const ok = await shouldPollNow();
+    if (!ok) return;
 
     try {
       if (toggles.drug || toggles.booster) {
         const cd = await xhrJSON(`https://api.torn.com/user/?selections=cooldowns&key=${encodeURIComponent(API_KEY)}`);
         const drugS = cd?.cooldowns?.drug ?? 0;
         const boosterS = cd?.cooldowns?.booster ?? 0;
+
         setEndFromSeconds('drug', drugS);
         setEndFromSeconds('booster', boosterS);
-        if (toggles.drug && drugS === 0 && (last.drugS ?? 1) !== 0) { if (!withinSnooze('drug')) raiseAlert('drug','Drug cooldown is now 0.'); }
-        if (toggles.booster && boosterS > 0 && boosterS <= BOOSTER_THRESHOLD_S) {
-          const wasAbove = (last.boosterS ?? (BOOSTER_THRESHOLD_S+1)) > BOOSTER_THRESHOLD_S;
-          if (wasAbove && !withinSnooze('booster')) raiseAlert('booster', `Booster cooldown ≤ 20 hours (${fmtHMS(boosterS)} remaining).`);
+
+        if (toggles.drug && drugS === 0 && (last.drugS ?? 1) !== 0) {
+          if (!withinSnooze('drug')) raiseAlert('drug','Drug cooldown is now 0.');
         }
-        last.drugS = drugS; last.boosterS = boosterS;
+        if (toggles.booster && boosterS > 0 && boosterS <= BOOSTER_THRESHOLD_S) {
+          const wasAbove = (last.boosterS ?? (BOOSTER_THRESHOLD_S + 1)) > BOOSTER_THRESHOLD_S;
+          if (wasAbove && !withinSnooze('booster')) {
+            raiseAlert('booster', `Booster cooldown ≤ 20 hours (${fmtHMS(boosterS)} remaining).`);
+          }
+        }
+        last.drugS = drugS;
+        last.boosterS = boosterS;
       }
     } catch {}
 
@@ -374,19 +395,25 @@
           const readyEpoch = (oc.ready_at || oc.readyAt || nowSec);
           const left = Math.max(0, readyEpoch - nowSec);
           setEndFromSeconds('oc', left);
-          const wasIn = !!last.ocInProgress, nowIn = left > 0;
+
+          const wasIn = !!last.ocInProgress;
+          const nowIn = left > 0;
           if (wasIn && left === 0 && !withinSnooze('oc')) raiseAlert('oc','OC finished.');
-          last.ocInProgress = nowIn; ocUnknownStreak = 0;
+          last.ocInProgress = nowIn;
+          ocUnknownStreak = 0;
         }
       }
     } catch {}
 
     await persist();
+    await markPolled();
   }
 
-  // OC DOM fallback
+  // OC DOM fallback (any Torn page)
   function scanOCDom() {
     if (!toggles.oc) return;
+
+    // If we already have an end-time counting down, let the pill handle it
     if (ends.oc && secLeftFromEnd(ends.oc) > 0) return;
 
     const body=document.body;
@@ -427,19 +454,25 @@
     }
   }
 
-  // Render pill
+  // Local tick (renders the pill every second from end-times)
   function renderPill(){
     const setText=(id,secs)=>{ const el=qs(id); if(el) el.textContent=fmtHMS(Math.max(0,secs)); };
+
+    // drug / booster
     const drugLeft = ends.drug ? secLeftFromEnd(ends.drug) : 0;
     const boosterLeft = ends.booster ? secLeftFromEnd(ends.booster) : 0;
-    setText('pill-drug', drugLeft); setText('pill-booster', boosterLeft);
+    setText('pill-drug', drugLeft);
+    setText('pill-booster', boosterLeft);
 
+    // education
     const eduLeft = ends.edu ? secLeftFromEnd(ends.edu) : 0;
     const eduEl=qs('pill-edu'); if (eduEl) eduEl.textContent = ends.edu && eduLeft>0 ? fmtHMS(eduLeft) : 'idle';
 
+    // OC
     const ocLeft = ends.oc ? secLeftFromEnd(ends.oc) : 0;
     const ocEl=qs('pill-oc'); if (ocEl) ocEl.textContent = ends.oc ? (ocLeft>0?fmtHMS(ocLeft):'ready') : (last.ocInProgress===false?'not in OC':'…');
 
+    // client-side finish guards (no extra API calls)
     if (toggles.drug && drugLeft===0 && (last._drugWasZero!==true)){ if(!withinSnooze('drug')) raiseAlert('drug','Drug cooldown is now 0.'); last._drugWasZero=true; }
     else if (drugLeft>0){ last._drugWasZero=false; }
 
@@ -499,9 +532,13 @@
     API_KEY = keyInput.value.trim();
     toggles = { drug:!!drugToggle.checked, booster:!!boosterToggle.checked, edu:!!eduToggle.checked, oc:!!ocToggle.checked };
     await persist();
+
+    // Re-arm hourly poll
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(refreshFromServer, POLL_MS);
+    // Force one initial poll if we haven't polled in the last hour
     refreshFromServer();
+
     if (ocDomTimer) clearInterval(ocDomTimer);
     ocDomTimer = setInterval(scanOCDom, OC_DOM_SCAN_MS);
     scanOCDom();
@@ -511,7 +548,6 @@
   async function init(){
     ensureUI();
 
-    // Start minimised each load (open via pill button)
     if (FORCE_MIN_ON_LOAD) setMinimised(true);
 
     await loadPersisted();
@@ -520,9 +556,16 @@
     pillTick = setInterval(renderPill, TICK_MS);
     renderPill();
 
+    // Hourly poller + “poll on visibility if stale”
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(refreshFromServer, POLL_MS);
-    refreshFromServer();
+    document.addEventListener('visibilitychange', async () => {
+      if (document.visibilityState === 'visible') {
+        if (await shouldPollNow()) refreshFromServer();
+      }
+    });
+    // On first load, poll immediately if stale (>1h)
+    if (await shouldPollNow()) refreshFromServer();
 
     if (ocDomTimer) clearInterval(ocDomTimer);
     ocDomTimer = setInterval(scanOCDom, OC_DOM_SCAN_MS);
@@ -530,15 +573,14 @@
 
     if (masterToggle.checked) pill.style.display='block';
 
-    // If anything deletes our nodes, recreate (but never the old side tab)
+    // Self-heal
     const mo=new MutationObserver(()=>{
       if(!qs('tcos-panel')||!document.querySelector('.tcos-pill')||!qs('tcos-overlay')||!qs('tcos-modal-wrap')){
         ensureUI(); makePillDraggable();
       }
-      const ghostTab=document.getElementById('tcos-minitab'); if (ghostTab && ghostTab.remove) ghostTab.remove();
+      const ghost=document.getElementById('tcos-minitab'); if (ghost && ghost.remove) ghost.remove();
     });
     mo.observe(document.documentElement,{childList:true,subtree:true});
-
     setInterval(()=>{ ensureUI(); makePillDraggable(); const ghost=document.getElementById('tcos-minitab'); if (ghost && ghost.remove) ghost.remove(); }, REATTACH_MS);
     restorePillPosition();
   }
