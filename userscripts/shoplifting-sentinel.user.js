@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Shoplifting Sentinel (Full-Screen Flash Alerts)
 // @namespace    https://github.com/BazookaJoe58
-// @version      1.0.2
-// @description  Full-screen flashing alert when selected shoplifting securities are down. Per-store toggles for BOTH / Camera / Guards, draggable UI, API key input, interval control. PDA-friendly. (Public API key only.) Flash is click-through; Acknowledge box stays clickable till you close it.
+// @version      1.0.4
+// @description  Full-screen flashing alert when selected shoplifting securities are down. Per-store toggles for BOTH / Camera / Guards, draggable UI, API key input, interval control. PDA-friendly. (Public API key only.) Flash is click-through; Acknowledge box stays clickable until closed. Panel hidden by default; open via status-bar "S" icon. Includes a 15-minute global Snooze.
 // @author       BazookaJoe
 // @match        https://www.torn.com/*
 // @run-at       document-end
@@ -33,6 +33,7 @@
     storeConfig: {},
     perStoreCooldownSec: 30,
     lastFired: {}, // storeKey -> unix seconds
+    snoozeUntil: 0, // unix seconds (global snooze)
   };
 
   function loadJSON(key, fallback) {
@@ -50,7 +51,8 @@
     position: fixed; z-index: 2147483000; width: 300px; box-sizing: border-box;
     top: 40px; left: 40px; background: #fff; color: #222; border-radius: 12px;
     box-shadow: 0 8px 30px rgba(0,0,0,.25); font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-    display: flex; flex-direction: column; overflow: hidden; border: 1px solid rgba(0,0,0,.08);
+    display: none; /* hidden by default */
+    flex-direction: column; overflow: hidden; border: 1px solid rgba(0,0,0,.08);
   }
   .dark-mode #tsentinel-wrap { color: #000; }
   #tsentinel-header {
@@ -95,11 +97,15 @@
   }
   #tsentinel-modal-title { font-size: 16px; font-weight: 800; margin-bottom: 6px; }
   #tsentinel-modal-reason { font-size: 14px; margin-bottom: 12px; line-height: 1.35; }
-  #tsentinel-ack {
-    border: 0; background: #ffd400; color: #000; font-weight: 800; border-radius: 999px;
-    padding: 8px 16px; cursor: pointer; font-size: 14px;
+  #tsentinel-modal-note { font-size: 12px; opacity: .8; margin: 6px 0 0 0; }
+  #tsentinel-actions { display:flex; gap:8px; justify-content:center; margin-top: 6px; }
+  #tsentinel-ack, #tsentinel-snooze {
+    border: 0; font-weight: 800; border-radius: 999px; padding: 8px 16px; cursor: pointer; font-size: 14px;
   }
+  #tsentinel-ack { background: #ffd400; color: #000; }
   #tsentinel-ack:hover { filter: brightness(0.95); }
+  #tsentinel-snooze { background: #b0d8ff; color: #003a75; }
+  #tsentinel-snooze:hover { filter: brightness(0.96); }
 
   /* Tiny statusbar button (optional quick toggle) */
   #tsentinel-icon { width: 18px; height: 18px; cursor:pointer; opacity:.75; border-radius:4px; background:#eaeaea; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; }
@@ -113,6 +119,7 @@
       CFG.storeConfig[storeKey] = { both: false, camera: false, guards: false };
     }
   }
+  const nowSec = () => Math.floor(Date.now() / 1000);
 
   // ------------------------ Flash + Modal (click-through flash) ------------------------
   function ensureFlash() {
@@ -132,12 +139,46 @@
       m.innerHTML = `
         <div id="tsentinel-modal-title">Shoplifting Alert</div>
         <div id="tsentinel-modal-reason">Security down</div>
-        <button id="tsentinel-ack" type="button">Acknowledge</button>
+        <div id="tsentinel-actions">
+          <button id="tsentinel-ack" type="button">Acknowledge</button>
+          <button id="tsentinel-snooze" type="button">Snooze 15m</button>
+        </div>
+        <div id="tsentinel-modal-note"></div>
       `;
       document.documentElement.appendChild(m);
       m.querySelector('#tsentinel-ack').addEventListener('click', hideAlert);
+      m.querySelector('#tsentinel-snooze').addEventListener('click', () => {
+        const end = nowSec() + 15 * 60;
+        CFG.snoozeUntil = end;
+        saveJSON(SKEY.cfg, CFG);
+        updateSnoozeNote();
+        hideAlert(); // close current alert immediately
+        toast('Alerts snoozed for 15 minutes');
+      });
     }
+    updateSnoozeNote();
     return m;
+  }
+
+  function updateSnoozeNote() {
+    const note = document.getElementById('tsentinel-modal-note');
+    if (!note) return;
+    const remaining = CFG.snoozeUntil - nowSec();
+    if (remaining > 0) {
+      const mins = Math.floor(remaining / 60);
+      const secs = remaining % 60;
+      note.textContent = `Snoozed: ${mins}m ${secs}s remaining`;
+    } else {
+      note.textContent = '';
+    }
+  }
+  let snoozeTimer = null;
+  function startSnoozeTicker() {
+    if (snoozeTimer) clearInterval(snoozeTimer);
+    snoozeTimer = setInterval(() => {
+      if (CFG.snoozeUntil <= nowSec()) { clearInterval(snoozeTimer); snoozeTimer = null; updateSnoozeNote(); return; }
+      updateSnoozeNote();
+    }, 500);
   }
 
   function showAlert(reason) {
@@ -148,12 +189,16 @@
     modal.style.display = 'block';
     const reasonEl = modal.querySelector('#tsentinel-modal-reason');
     if (reasonEl) reasonEl.textContent = reason || 'Security down';
+    startSnoozeTicker();
   }
   function hideAlert() {
     const flash = document.getElementById('tsentinel-flash');
     const modal = document.getElementById('tsentinel-modal');
     if (flash) flash.style.display = 'none';
     if (modal) modal.style.display = 'none';
+  }
+  function toast(msg) {
+    try { if (typeof GM_notification === 'function') GM_notification({ title: 'Shoplifting Sentinel', text: msg, timeout: 2500 }); } catch {}
   }
 
   // ------------------------ UI Build ------------------------
@@ -162,6 +207,8 @@
 
     const wrap = document.createElement('div');
     wrap.id = 'tsentinel-wrap';
+    wrap.style.display = 'none'; // hidden by default; open via icon
+
     // restore position
     try {
       const pos = loadJSON(SKEY.pos, { x: 40, y: 40 });
@@ -216,13 +263,13 @@
     const $stores   = wrap.querySelector('#tsentinel-stores');
     const $refresh  = wrap.querySelector('#tsentinel-refresh');
     const $test     = wrap.querySelector('#tsentinel-test');
-    const $icon     = wrap.querySelector('#tsentinel-icon');
+    const $iconBtn  = wrap.querySelector('#tsentinel-icon');
 
     $enabled.checked = !!CFG.enabled;
     $api.value = API_KEY || '';
     $interval.value = CFG.intervalSec;
 
-    $icon.addEventListener('click', () => {
+    $iconBtn.addEventListener('click', () => {
       wrap.style.display = (wrap.style.display === 'none') ? '' : 'none';
     });
 
@@ -245,15 +292,13 @@
     });
 
     $refresh.addEventListener('click', () => pingNow(true, $stores));
-    $test.addEventListener('click', () => {
-      showAlert('TEST — manual check');
-    });
+    $test.addEventListener('click', () => { showAlert('TEST — manual check'); });
 
-    // Render cached shops immediately (if any)
+    // Render cached shops immediately (if any) so toggles appear as soon as you open the panel
     const cached = loadJSON(SKEY.lastShops, null);
     if (cached && Array.isArray(cached)) renderStores(cached, $stores);
 
-    // auto-start polling if enabled
+    // auto-start polling if enabled (panel stays hidden)
     if (CFG.enabled) startPolling();
   }
 
@@ -347,13 +392,16 @@
       const raw = await fetchShoplifting();
       const entries = Object.entries(raw).map(([key, status]) => ({ key, status }));
 
-      // cache shops so toggles show on next load even before fetch
+      // cache shops so toggles show next time you open the panel
       saveJSON(SKEY.lastShops, entries);
 
       renderStores(entries, $storesEl);
 
       // Decide alerts
-      const now = Math.floor(Date.now() / 1000);
+      const now = nowSec();
+
+      // If globally snoozed, skip alert checks entirely
+      const snoozed = CFG.snoozeUntil > now;
       entries.forEach(({ key, status }) => {
         ensureStoreEntry(key);
         const cfg = CFG.storeConfig[key];
@@ -375,6 +423,9 @@
         }
 
         if (shouldAlert) {
+          // If snoozed, do not fire, but keep cooldown timestamps so we don't spam after snooze ends
+          if (snoozed) return;
+
           const last = CFG.lastFired[key] || 0;
           if (now - last >= (CFG.perStoreCooldownSec || 30)) {
             CFG.lastFired[key] = now;
@@ -394,7 +445,6 @@
         }
       });
     } catch (e) {
-      // Gentle hint for API key issues
       if (String(e.message || e).toLowerCase().includes('api key')) {
         const $api = document.getElementById('tsentinel-apikey');
         if ($api) { $api.style.outline = '2px solid #e33'; setTimeout(() => ($api.style.outline = ''), 1500); }
@@ -431,9 +481,12 @@
     };
     injectStatusIcon();
 
-    // Keep panel alive if Torn does SPA swaps
+    // Keep panel available if Torn does SPA swaps (stays hidden until you toggle)
     const mo = new MutationObserver(() => {
       if (!document.getElementById('tsentinel-wrap')) buildPanel();
+      // keep snooze note ticking if modal open
+      const modal = document.getElementById('tsentinel-modal');
+      if (modal && modal.style.display !== 'none') startSnoozeTicker();
     });
     mo.observe(document.documentElement, { childList: true, subtree: true });
   });
