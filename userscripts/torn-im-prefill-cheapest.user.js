@@ -1,19 +1,20 @@
 // ==UserScript==
 // @name         Torn Item Market — Prefill (Right 25% Fill Max Overlay + Cheapest Confirm Align)
 // @namespace    https://torn.city/
-// @version      2.7.0
+// @version      2.7.2
 // @description  Right-aligned 25% "Fill Max" overlay on native Buy/Confirm. For the cheapest listing only, the confirm "Yes" button appears exactly behind the overlay spot. No confirm bypass; just UI positioning tweaks.
 // @author       Baz
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
 // @grant        GM_addStyle
-// @downloadURL  https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/torn-im-prefill-cheapest.user.js
-// @updateURL    https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/torn-im-prefill-cheapest.user.js
+// @downloadURL  https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/main/userscripts/torn-im-prefill-cheapest.user.js
+// @updateURL    https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/main/userscripts/torn-im-prefill-cheapest.user.js
 // ==/UserScript==
 
 (function () {
   'use strict';
 
+  // ---------- Styles ----------
   GM_addStyle(`
     .im-fill-overlay {
       position:absolute;
@@ -30,11 +31,14 @@
     .im-fill-overlay.im-done { z-index:-1; pointer-events:none; background:transparent; border-color:transparent }
     .im-flash { box-shadow:0 0 0 3px rgba(0,160,255,.55)!important; transition:box-shadow .25s ease }
 
-    /* When we relocate the confirm button, make it look natural in the spot */
+    /* When we relocate the confirm button, make it sit exactly behind the overlay spot */
     .im-relocated-confirm {
       position: fixed !important;
       z-index: 2147483647 !important; /* above Torn modals */
       margin: 0 !important;
+      display: flex !important;
+      align-items: center !important;
+      justify-content: center !important;
     }
   `);
 
@@ -108,7 +112,7 @@
     for (let i=0;i<20;i++){ await sleep(20); if (findAmountInputForRow(row)) break; }
   }
 
-  // ---------- Find the cheapest visible row ----------
+  // ---------- Cheapest row helpers ----------
   function getRows(){
     const list=document.querySelector(SEL.list); if (!list) return [];
     return Array.from(list.querySelectorAll(`${SEL.rowWrapper} > ${SEL.row}`))
@@ -160,20 +164,18 @@
   }
   function looksLikeConfirmButton(btn){
     const t=(btn.textContent||'').trim().toLowerCase();
-    // Torn often uses "Yes", "Buy", "Confirm", maybe localized; include common variants
     return /(yes|buy|confirm|purchase|ok|proceed)/i.test(t);
   }
   function relocateConfirmButtons(){
     if (!isFreshCheapestClick()) return;
+    const r = lastCheapestOverlayRect;
 
     // Find likely confirm buttons in modals/popups
     const candidates = Array.from(document.querySelectorAll('button, a'))
       .filter(b=>{
-        // visible, high in DOM, part of a dialog/popup or at top layers
         const s=getComputedStyle(b);
         if (s.display==='none' || s.visibility==='hidden' || b.offsetParent===null) return false;
         if (!looksLikeConfirmButton(b)) return false;
-        // heuristics: within a dialog-ish container or raised z-index
         const z = parseInt(s.zIndex || '0', 10);
         if (z>1000) return true;
         const p=b.closest('[role="dialog"], .ui-dialog, .popup, [class*="modal"], [class*="dialog"]');
@@ -181,17 +183,11 @@
       });
 
     for (const btn of candidates){
-      // Apply fixed positioning to the stored overlay rect
-      const r = lastCheapestOverlayRect;
       btn.classList.add('im-relocated-confirm');
       btn.style.left   = `${r.left}px`;
       btn.style.top    = `${r.top}px`;
       btn.style.width  = `${r.width}px`;
       btn.style.height = `${r.height}px`;
-      // optional: center label
-      btn.style.display = 'flex';
-      btn.style.alignItems = 'center';
-      btn.style.justifyContent = 'center';
     }
   }
 
@@ -249,11 +245,9 @@
       if (afford<=0) input.placeholder='Insufficient funds';
       flash(input);
 
-      // If this row is the cheapest, cache overlay viewport rect for confirm relocation
       if (isCheapest){
         lastCheapestOverlayRect = getViewportRect(overlay);
         lastCheapestClickAt = Date.now();
-        // try a delayed relocation pass (in case dialog already spawned)
         setTimeout(relocateConfirmButtons, 50);
         setTimeout(relocateConfirmButtons, 150);
         setTimeout(relocateConfirmButtons, 300);
