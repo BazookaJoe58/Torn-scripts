@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Cooldown & OC Sentinel
 // @namespace    http://tampermonkey.net/
-// @version      1.3.9
+// @version      1.4.0
 // @description  Semi-transparent full-screen flash + modal acknowledge for: Drug (0), Booster (≤20h), Education finish, OC finished / Not in OC. PDA-friendly, draggable, minimisable (starts minimised). Single API key (Limited). Overlay is click-through; modal captures clicks. Author: BazookaJoe.
 // @author       BazookaJoe
 // @match        https://www.torn.com/*
@@ -66,7 +66,6 @@
   let ends = { drug:0, booster:0, edu:0, oc:0 };
 
   let flashTimer = null;
-  let flashOn = false;
   let currentAlertKey = null;
   let pillTick = null;
   let pollTimer = null;
@@ -83,18 +82,20 @@
 
   // Helpers
   const pad2 = (n) => String(n).padStart(2, '0');
-  function fmtHMS(sec) { if (!Number.isFinite(sec) || sec < 0) sec = 0;
+  const fmtHMS = (sec) => {
+    if (!Number.isFinite(sec) || sec < 0) sec = 0;
     const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = Math.floor(sec%60);
-    return `${pad2(h)}:${pad2(m)}:${pad2(s)}`; }
+    return `${pad2(h)}:${pad2(m)}:${pad2(s)}`;
+  };
   const withinSnooze = (k) => Date.now() < (snoozeUntil[k] || 0);
   function setSnooze(k, ms = SNOOZE_MS) { snoozeUntil[k] = Date.now() + ms; persist(); }
   function clearSnooze(k){ snoozeUntil[k] = 0; }
   function secLeftFromEnd(endMs) { return Math.ceil((endMs - Date.now()) / 1000); }
   function setEndFromSeconds(key, seconds) { ends[key] = seconds > 0 ? (Date.now() + seconds * 1000) : 0; }
-  function qs(id) { return document.getElementById(id); }
-  function root()  { return document.body || document.documentElement; }
+  const qs = (id) => document.getElementById(id);
+  const root = () => document.body || document.documentElement;
   function safeAppend(el) { try { root().appendChild(el); } catch {} }
-  function debounce(fn, wait){ let t=null; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), wait); }; }
+  const debounce = (fn, wait) => { let t=null; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), wait); }; };
 
   // Styles
   GM_addStyle(`
@@ -108,7 +109,7 @@
     #tcos-modal .btn.secondary{background:#bdc3c7;}
     #tcos-modal .why{font-size:12px;opacity:.8;margin-top:4px;}
 
-    #tcos-panel{position:fixed;bottom:16px;left:16px;width:340px;max-width:95vw;background:rgba(0,0,0,0.85);color:#eee;border:1px solid #444;border-radius:14px;z-index:2147483645;backdrop-filter:blur(4px);touch-action:none;}
+    #tcos-panel{position:fixed;bottom:16px;left:16px;width:340px;max-width:95vw;background:rgba(0,0,0,0.85);color:#eee;border:1px solid #444;border-radius:14px;z-index:2147483645;backdrop-filter:blur(4px);touch-action:none;display:none;}
     #tcos-head{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;cursor:move;gap:8px;background:rgba(255,255,255,0.06);border-top-left-radius:14px;border-top-right-radius:14px;}
     #tcos-title{font-weight:800;font-size:14px;}
     #tcos-toggle{appearance:none;width:44px;height:26px;border-radius:26px;background:#777;position:relative;outline:none;cursor:pointer;}
@@ -129,27 +130,32 @@
     #tcos-tests-menu{position:absolute;right:0;bottom:34px;display:none;min-width:180px;background:rgba(20,20,20,0.98);border:1px solid #444;border-radius:10px;padding:6px;z-index:2147483648;}
     #tcos-tests-menu button{width:100%;text-align:left;margin:2px 0;}
 
-    /* Draggable pill (defaults to right side) */
+    /* Draggable pill with Open button */
     .tcos-pill{
       position:fixed; right:0; top:40%; transform:translateY(-50%);
-      min-width:160px; padding:10px 12px; border-radius:10px 0 0 10px;
-      background:rgba(0,0,0,0.75); color:#eee; border:1px solid #444;
+      min-width:170px; padding:12px 12px 10px 12px; border-radius:10px 0 0 10px;
+      background:rgba(0,0,0,0.78); color:#eee; border:1px solid #444;
       font-family:monospace; font-size:12px; z-index:2147483644; cursor:move; user-select:none;
     }
-    .tcos-pill div.row{display:flex;justify-content:space-between;gap:8px;}
-    .tcos-pill .bar{display:grid;gap:4px;}
+    .tcos-pill .row{display:flex;justify-content:space-between;gap:8px;}
+    .tcos-pill .bar{display:grid;gap:4px;padding-top:24px;}
     .tcos-pill .open-ui{
-      position:absolute; top:4px; left:6px; width:20px; height:20px; line-height:20px; text-align:center;
-      border-radius:6px; border:1px solid #555; background:rgba(255,255,255,0.08); color:#eee; cursor:pointer; font-weight:800; font-family:system-ui;
-      user-select:none;
+      position:absolute; top:6px; left:8px; height:18px; padding:0 6px;
+      display:inline-flex; align-items:center; justify-content:center;
+      border-radius:6px; border:1px solid #555; background:rgba(255,255,255,0.10);
+      color:#eee; cursor:pointer; font:700 11px/18px system-ui,-apple-system,Segoe UI,Roboto,Arial; user-select:none; z-index:1;
     }
-    .tcos-pill .open-ui:hover{background:rgba(255,255,255,0.15);}
-
-    #tcos-panel button:focus,#tcos-panel input:focus,#tcos-modal .btn:focus{outline:2px solid #fff;outline-offset:2px;}
+    .tcos-pill .open-ui:hover{background:rgba(255,255,255,0.18);}
+    .tcos-pill .open-ui:active{transform:scale(0.98);}
+    #tcos-panel button:focus,#tcos-panel input:focus,#tcos-modal .btn:focus,.tcos-pill .open-ui:focus{outline:2px solid #fff;outline-offset:2px;}
   `);
 
   // Build UI (idempotent)
   function ensureUI() {
+    // Hard-remove any legacy side tab from older builds
+    const oldTab = document.getElementById('tcos-minitab');
+    if (oldTab && oldTab.remove) oldTab.remove();
+
     overlay = qs('tcos-overlay') || (()=>{const d=document.createElement('div');d.id='tcos-overlay';safeAppend(d);return d;})();
     modalWrap = qs('tcos-modal-wrap') || (()=>{const w=document.createElement('div');w.id='tcos-modal-wrap';w.innerHTML=`
       <div id="tcos-modal" role="dialog" aria-modal="true" aria-labelledby="tcos-title-h3">
@@ -194,7 +200,7 @@
       </div>`; safeAppend(p); return p;})();
 
     pill = document.querySelector('.tcos-pill') || (()=>{const s=document.createElement('div');s.className='tcos-pill';s.innerHTML=`
-      <div class="open-ui" id="tcos-open">≡</div>
+      <div class="open-ui" id="tcos-open">Open</div>
       <div class="bar">
         <div class="row"><span>Drug</span><span id="pill-drug">--:--:--</span></div>
         <div class="row"><span>Booster</span><span id="pill-booster">--:--:--</span></div>
@@ -216,10 +222,13 @@
     bindOnce('tcos-ack-snooze', 'click', onAckSnooze);
     bindOnce('tcos-save', 'click', onSave);
     bindOnce('tcos-min', 'click', () => setMinimised(true));
+
+    // Open UI from the pill's button
     if (pillOpenBtn && !pillOpenBtn.dataset.bound) {
       pillOpenBtn.addEventListener('click', (e)=>{ e.stopPropagation(); setMinimised(false); });
       pillOpenBtn.dataset.bound = '1';
     }
+
     if (!testsBtn.dataset.bound){
       testsBtn.addEventListener('click',(e)=>{e.stopPropagation();testsMenu.style.display=testsMenu.style.display==='block'?'none':'block';});
       document.addEventListener('click',(e)=>{ if(!testsMenu.contains(e.target) && e.target!==testsBtn) testsMenu.style.display='none';});
@@ -229,6 +238,7 @@
       qs('tcos-test-oc').addEventListener('click',()=>{currentAlertKey='oc';raiseAlert('oc','Test: OC finished / Not in OC.');});
       testsBtn.dataset.bound='1';
     }
+
     if (!masterToggle.dataset.bound){
       masterToggle.addEventListener('change',()=>{ if(!masterToggle.checked) stopFlash(); pill.style.display=masterToggle.checked?'block':'none';});
       masterToggle.dataset.bound='1';
@@ -268,11 +278,8 @@
     const pos = await GM_getValue(STORAGE.pos, null);
     const pillPos = await GM_getValue(STORAGE.pillPos, null);
 
+    // Start minimised each load unless you open this session
     let min = true;
-    if (!FORCE_MIN_ON_LOAD) {
-      const stored = await GM_getValue(STORAGE.minimized, undefined);
-      min = (typeof stored === 'undefined') ? true : !!stored;
-    }
     await GM_setValue(STORAGE.minimized, min);
 
     keyInput.value = API_KEY || '';
@@ -300,15 +307,16 @@
 
   // Flash / Modal
   function startFlash(color, reason, heading){
-    msgEl.textContent = heading || 'Attention';
-    whyEl.textContent = reason || '';
-    modalWrap.style.display = 'flex';
+    qs('tcos-msg').textContent = heading || 'Attention';
+    qs('tcos-why').textContent = reason || '';
+    qs('tcos-modal-wrap').style.display = 'flex';
+
     overlay.style.background = 'transparent';
     if (flashTimer) clearInterval(flashTimer);
-    flashOn = false;
-    flashTimer = setInterval(()=>{ flashOn=!flashOn; overlay.style.backgroundColor = flashOn ? color : 'rgba(0,0,0,0.0)'; }, FLASH_INTERVAL_MS);
+    let on = false;
+    flashTimer = setInterval(()=>{ on=!on; overlay.style.backgroundColor = on ? color : 'rgba(0,0,0,0.0)'; }, FLASH_INTERVAL_MS);
   }
-  function stopFlash(){ if(flashTimer) clearInterval(flashTimer); flashTimer=null; flashOn=false; overlay.style.background='transparent'; modalWrap.style.display='none'; }
+  function stopFlash(){ if(flashTimer) clearInterval(flashTimer); flashTimer=null; overlay.style.background='transparent'; qs('tcos-modal-wrap').style.display='none'; }
   function raiseAlert(alertKey, reasonText){ if(!toggles[alertKey]) return; if(withinSnooze(alertKey)) return;
     currentAlertKey=alertKey; const {color,label}=ALERTS[alertKey]; startFlash(color, reasonText, label); }
   function onAck(){ if(currentAlertKey){ clearSnooze(currentAlertKey); persist(); } stopFlash(); }
@@ -366,7 +374,7 @@
           const readyEpoch = (oc.ready_at || oc.readyAt || nowSec);
           const left = Math.max(0, readyEpoch - nowSec);
           setEndFromSeconds('oc', left);
-          const wasIn = !!last.ocInProgress; const nowIn = left > 0;
+          const wasIn = !!last.ocInProgress, nowIn = left > 0;
           if (wasIn && left === 0 && !withinSnooze('oc')) raiseAlert('oc','OC finished.');
           last.ocInProgress = nowIn; ocUnknownStreak = 0;
         }
@@ -459,7 +467,8 @@
     if (!pill || pill.dataset.bound) return;
     let dragging=false, offsetX=0, offsetY=0;
 
-    // Prevent drag when pressing the open button
+    // Don't start drag when clicking the open button
+    pillOpenBtn = document.getElementById('tcos-open');
     if (pillOpenBtn) {
       pillOpenBtn.addEventListener('mousedown', (e)=>e.stopPropagation());
       pillOpenBtn.addEventListener('touchstart', (e)=>{ e.stopPropagation(); }, {passive:false});
@@ -502,6 +511,7 @@
   async function init(){
     ensureUI();
 
+    // Start minimised each load (open via pill button)
     if (FORCE_MIN_ON_LOAD) setMinimised(true);
 
     await loadPersisted();
@@ -520,10 +530,16 @@
 
     if (masterToggle.checked) pill.style.display='block';
 
-    const mo=new MutationObserver(()=>{ if(!qs('tcos-panel')||!document.querySelector('.tcos-pill')||!qs('tcos-overlay')||!qs('tcos-modal-wrap')){ ensureUI(); makePillDraggable(); } });
+    // If anything deletes our nodes, recreate (but never the old side tab)
+    const mo=new MutationObserver(()=>{
+      if(!qs('tcos-panel')||!document.querySelector('.tcos-pill')||!qs('tcos-overlay')||!qs('tcos-modal-wrap')){
+        ensureUI(); makePillDraggable();
+      }
+      const ghostTab=document.getElementById('tcos-minitab'); if (ghostTab && ghostTab.remove) ghostTab.remove();
+    });
     mo.observe(document.documentElement,{childList:true,subtree:true});
 
-    setInterval(()=>{ ensureUI(); makePillDraggable(); }, REATTACH_MS);
+    setInterval(()=>{ ensureUI(); makePillDraggable(); const ghost=document.getElementById('tcos-minitab'); if (ghost && ghost.remove) ghost.remove(); }, REATTACH_MS);
     restorePillPosition();
   }
 
