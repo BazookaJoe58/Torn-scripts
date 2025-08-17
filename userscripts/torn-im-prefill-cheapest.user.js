@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Item Market — Prefill (Right 25% Fill Max Overlay)
 // @namespace    https://torn.city/
-// @version      2.4.2
-// @description  Rightmost 25% "Fill Max" overlay aligned to the native Buy/Confirm (anchored to its parent). Click to fill max affordable qty, overlay drops behind so the native Buy is clickable. No confirm bypass. Hard no-scroll.
+// @version      2.5.0
+// @description  Rightmost 25% "Fill Max" overlay aligned to native Buy/Confirm (anchored to parent). Hard no-scroll (locks viewport, patches scrollIntoView/scrollTo), fills max affordable, then overlay drops behind so native Buy is clickable. No confirm bypass.
 // @author       Baz
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
@@ -50,32 +50,79 @@
   const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
   const rowWrap = (row)=>row.closest(SEL.rowWrapper) || row.closest('li') || document.body;
 
-  // Hard scroll lock wrapper to prevent Torn’s auto-centering
-  async function withNoScroll(fn){
+  // Ultra-hard scroll lock (prevents any auto-centering)
+  async function withNoScrollHard(fn){
     const x = window.scrollX, y = window.scrollY;
-    const restore = ()=>window.scrollTo(x,y);
-    const styleId = 'im-nosmooth-style';
-    if (!document.getElementById(styleId)){
-      const s = document.createElement('style');
-      s.id = styleId;
-      s.textContent = `html,body{scroll-behavior:auto !important}`;
-      document.head.appendChild(s);
+
+    // CSS: kill smooth behavior
+    let styleNode = document.getElementById('im-nosmooth-style');
+    if (!styleNode){
+      styleNode = document.createElement('style');
+      styleNode.id = 'im-nosmooth-style';
+      styleNode.textContent = `html,body{scroll-behavior:auto!important;}`;
+      document.head.appendChild(styleNode);
     }
-    const onScroll = ()=>restore();
-    window.addEventListener('scroll', onScroll, {capture:true});
-    try{
-      restore();
-      const pins = [0,16,32,64,96,128,160,200];
-      const p = fn();
-      for (const t of pins) setTimeout(restore, t);
-      const out = await p;
-      for (const t of pins) setTimeout(restore, t);
-      requestAnimationFrame(restore);
-      requestAnimationFrame(()=>requestAnimationFrame(restore));
+
+    // Freeze viewport: lock body position
+    const body = document.body;
+    const prevBodyCss = {
+      position: body.style.position,
+      top: body.style.top,
+      left: body.style.left,
+      width: body.style.width,
+      overflow: body.style.overflow,
+    };
+    body.style.position = 'fixed';
+    body.style.top = `-${y}px`;
+    body.style.left = `-${x}px`;
+    body.style.width = '100%';
+    body.style.overflow = 'hidden';
+
+    // Patch programmatic scroll calls
+    const ElementProto = Element.prototype;
+    const origSIV = ElementProto.scrollIntoView;
+    const origScrollTo = window.scrollTo;
+
+    ElementProto.scrollIntoView = function noop(){ /* blocked */ };
+    window.scrollTo = function lockedScrollTo(){ /* blocked */ };
+
+    // Block user inputs that cause scroll
+    const blockEvt = e => { e.preventDefault(); e.stopPropagation(); };
+    const unblockers = [
+      ['wheel', {passive:false, capture:true}],
+      ['touchmove', {passive:false, capture:true}],
+      ['keydown', {capture:true}],
+    ];
+    const keyBlocker = e => {
+      if (['ArrowUp','ArrowDown','PageUp','PageDown','Home','End',' '].includes(e.key)) blockEvt(e);
+    };
+    window.addEventListener('wheel', blockEvt, {passive:false, capture:true});
+    window.addEventListener('touchmove', blockEvt, {passive:false, capture:true});
+    window.addEventListener('keydown', keyBlocker, {capture:true});
+
+    try {
+      // Ensure snapped to current pos
+      window.scrollTo(x, y);
+      const out = await fn();
       return out;
     } finally {
-      setTimeout(()=>window.removeEventListener('scroll', onScroll, {capture:true}), 250);
-      setTimeout(restore, 250);
+      // Restore patches & CSS & position
+      ElementProto.scrollIntoView = origSIV;
+      window.scrollTo = origScrollTo;
+
+      window.removeEventListener('wheel', blockEvt, {capture:true});
+      window.removeEventListener('touchmove', blockEvt, {capture:true});
+      window.removeEventListener('keydown', keyBlocker, {capture:true});
+
+      // Restore body lock -> actual scroll position
+      body.style.position = prevBodyCss.position;
+      body.style.top = prevBodyCss.top;
+      body.style.left = prevBodyCss.left;
+      body.style.width = prevBodyCss.width;
+      body.style.overflow = prevBodyCss.overflow;
+
+      // Re-apply original scroll
+      window.scrollTo(x, y);
     }
   }
 
@@ -118,7 +165,7 @@
     const btns=Array.from(li.querySelectorAll(SEL.buyButtons)).filter(b=>{
       const txt=(b.textContent||'').trim().toLowerCase();
       if (!txt) return false;
-      if (/show\s*buy/i.test(txt)) return false;
+      if (/show\s*buy/i.test(txt)) return false; // toggle
       return /buy|confirm|purchase/.test(txt);
     });
     const visible = btns.find(b=>b.getBoundingClientRect().width>0 && b.getBoundingClientRect().height>0);
@@ -135,7 +182,6 @@
   function positionOverlayOverRightQuarter(overlay, nativeBtn){
     const parent = overlay.parentElement;
     if (!parent) return;
-    // Compute offsets within the parent
     const parentRect = parent.getBoundingClientRect();
     const btnRect    = nativeBtn.getBoundingClientRect();
 
@@ -144,8 +190,8 @@
     const w    = btnRect.width;
     const h    = btnRect.height;
 
-    const ow   = Math.max(24, Math.round(w * 0.25)); // quarter width, min 24px
-    const ox   = left + (w - ow);                    // rightmost quarter
+    const ow   = Math.max(24, Math.round(w * 0.25));
+    const ox   = left + (w - ow);
 
     overlay.style.top    = `${top}px`;
     overlay.style.left   = `${ox}px`;
@@ -154,9 +200,8 @@
     overlay.style.borderRadius = '0 8px 8px 0';
   }
 
-  // ---------- Core: create overlay anchored to the Buy's parent ----------
+  // ---------- Core: overlay ----------
   async function placeOverlay(row){
-    // find native Buy (or Confirm)
     let native=null;
     const start=performance.now();
     while (!native && performance.now()-start<3000){
@@ -165,15 +210,11 @@
     }
     if (!native) return;
 
-    // Use the Buy button's parent as the positioning context
     const container = native.parentElement || row;
-    const cs = getComputedStyle(container);
-    if (cs.position === 'static') container.style.position='relative';
+    if (getComputedStyle(container).position === 'static') container.style.position='relative';
 
-    // Avoid duplicates
     if (container.querySelector(':scope > .im-fill-overlay')) return;
 
-    // Create non-focusable overlay element
     const overlay = document.createElement('div');
     overlay.className = 'im-fill-overlay';
     overlay.setAttribute('role','button');
@@ -181,32 +222,29 @@
     overlay.setAttribute('tabindex','-1');
     overlay.textContent = 'Fill Max';
 
-    // Initial placement
+    // Initial & reactive positioning
     positionOverlayOverRightQuarter(overlay, native);
-
-    // Keep aligned on size/position changes
     const ro = new ResizeObserver(()=>positionOverlayOverRightQuarter(overlay, native));
     ro.observe(container);
     ro.observe(native);
-    // Also update on scroll (parent/row may move without resize)
     const realign = ()=>positionOverlayOverRightQuarter(overlay, native);
     window.addEventListener('scroll', realign, {passive:true});
     const mo = new MutationObserver(()=>positionOverlayOverRightQuarter(overlay, native));
     mo.observe(container, {attributes:true, childList:false, subtree:false});
 
-    // Prevent default interactions/bubbling to avoid any native focus/scroll
+    // Block native interactions
     overlay.addEventListener('mousedown', (e)=>{ e.preventDefault(); e.stopPropagation(); }, {capture:true});
     overlay.addEventListener('click', (e)=>{
       e.preventDefault(); e.stopPropagation();
 
-      withNoScroll(async ()=>{
+      withNoScrollHard(async ()=>{
         const unitPrice=parseMoney(row.querySelector(SEL.price)?.textContent);
         const qtyText=row.querySelector(SEL.qtyCell)?.textContent;
         const qty=toInt(qtyText);
         const wallet=getWalletFromHeader();
         const afford=computeAfford(wallet,unitPrice,qty);
 
-        await ensureControlsOpen(row);   // guarded by withNoScroll
+        await ensureControlsOpen(row);
 
         const input=findAmountInputForRow(row);
         if (!input) return;
@@ -215,14 +253,12 @@
         if (afford<=0) input.placeholder='Insufficient funds';
         flash(input);
 
-        // Drop behind so the native Buy is immediately clickable
         overlay.classList.add('im-done');
       });
     }, {capture:true});
 
-    // Keyboard (Space/Enter) should not scroll page
     const killKeys = (e)=>{
-      if (e.key === ' ' || e.key === 'Enter'){
+      if ([' ','Enter'].includes(e.key)){
         e.preventDefault(); e.stopPropagation();
         overlay.click();
       }
@@ -230,7 +266,6 @@
     overlay.addEventListener('keydown', killKeys, {capture:true});
     overlay.addEventListener('keyup',   killKeys, {capture:true});
 
-    // Insert overlay
     container.appendChild(overlay);
   }
 
@@ -244,7 +279,6 @@
     for (const row of getRows()) placeOverlay(row);
   }
 
-  // Observe and keep overlays in sync with React list updates
   const docMO=new MutationObserver(()=>{
     if (docMO._raf) cancelAnimationFrame(docMO._raf);
     docMO._raf=requestAnimationFrame(()=>setTimeout(refresh,30));
