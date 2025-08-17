@@ -1,29 +1,31 @@
 // ==UserScript==
-// @name         Torn Item Market — Fill Max → Buy (single button)
+// @name         Torn Item Market — Fill Max overlay on native Buy
 // @namespace    https://torn.city/
-// @version      2.2.1
-// @description  One button per row: first click fills max affordable qty; then the same button becomes Buy and forwards your click to Torn's native Buy/Confirm. No bypasses.
+// @version      2.3.0
+// @description  Overlays a "Fill Max" button on top of Torn's native Buy/Confirm. Click once to fill max affordable qty, then the overlay disappears so you can click the real Buy. No bypasses, no auto-clicks.
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
 // @grant        GM_addStyle
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @downloadURL  https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/torn-im-prefill-cheapest.user.js
 // @updateURL    https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/torn-im-prefill-cheapest.user.js
 // ==/UserScript==
 
-(function(){
+(function () {
   'use strict';
 
   GM_addStyle(`
-    .im-available-cell{position:relative}
-    .im-fillbuy{position:absolute;top:20px;right:7px;padding:2px 8px;font-size:11px;border-radius:8px;
-      border:1px solid var(--tt-color-green, #16a34a); color:var(--tt-color-green, #16a34a);
-      background:transparent; cursor:pointer; line-height:1.1}
-    body:not(.tt-mobile):not(.tt-tablet) .im-fillbuy:hover{color:#fff;background:var(--tt-color-green, #16a34a)}
-    .im-fillbuy.is-buy{border-color:#3b82f6;color:#e5e7eb;background:#0b1220}
-    body:not(.tt-mobile):not(.tt-tablet) .im-fillbuy.is-buy:hover{filter:brightness(1.05)}
-    .im-flash{box-shadow:0 0 0 3px rgba(0,160,255,.55)!important;transition:box-shadow .25s ease}
+    .im-fill-overlay {
+      position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+      border-radius:8px; cursor:pointer; font-size:12px; font-weight:600; z-index: 9;
+      background: rgba(22, 163, 74, 0.12); color: #16a34a; border: 1px solid #16a34a;
+      backdrop-filter: blur(1px);
+    }
+    .im-fill-overlay:hover { background: rgba(22, 163, 74, 0.2); }
+    .im-flash { box-shadow:0 0 0 3px rgba(0,160,255,.55) !important; transition: box-shadow .25s ease; }
   `);
 
+  // ---- selectors from your DOM ----
   const SEL = {
     list: 'ul[class*="sellerList"]',
     rowWrapper: 'li[class*="rowWrapper"]',
@@ -35,55 +37,52 @@
     buyButtons: 'button, a'
   };
 
+  // ---- utils ----
   const parseMoney = (s)=>{ s=String(s||'').replace(/[^\d.]/g,''); return s?Math.floor(Number(s)):NaN; };
   const toInt = (s)=>{ const m=String(s||'').match(/\d[\d,]*/); return m?Number(m[0].replace(/[^\d]/g,'')):NaN; };
   const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
   const rowWrapper = (row)=>row.closest(SEL.rowWrapper) || row.closest('li') || document.body;
 
-  function setInputValue(input, value){
-    const proto=Object.getPrototypeOf(input);
-    const setter=Object.getOwnPropertyDescriptor(proto,'value')?.set;
-    if (setter) setter.call(input, String(value)); else input.value=String(value);
-    // Fire a few events to satisfy React forms
-    input.dispatchEvent(new Event('input', {bubbles:true}));
-    input.dispatchEvent(new Event('change', {bubbles:true}));
-    input.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true, key:'0'}));
-  }
-  function flash(el){ el.classList.add('im-flash'); setTimeout(()=>el.classList.remove('im-flash'),280); }
-
-  function readWalletHeader(){
+  function getWalletFromHeader(){
     const root=document.querySelector('#topRoot')||document.body;
     for (const n of root.querySelectorAll('span,div,a,li,b,strong')){
-      const t=n.textContent||'';
-      if (/\$\s?[\d,. ]+/.test(t)){
+      const t=n.textContent||''; if (/\$\s?[\d,. ]+/.test(t)){
         const v=parseMoney(t); if (Number.isFinite(v) && v>=0) return v;
       }
     }
     return NaN;
   }
-
   function computeAfford(wallet, unitPrice, qty){
     if (!Number.isFinite(wallet)||wallet<=0) return 0;
     if (!Number.isFinite(unitPrice)||unitPrice<=0) return 0;
     if (!Number.isFinite(qty)||qty<=0) qty=Infinity;
     return Math.max(0, Math.min(Math.floor(wallet/unitPrice), qty));
   }
+  function setInputValue(input, value){
+    const proto=Object.getPrototypeOf(input);
+    const setter=Object.getOwnPropertyDescriptor(proto,'value')?.set;
+    if (setter) setter.call(input, String(value)); else input.value=String(value);
+    input.dispatchEvent(new Event('input',{bubbles:true}));
+    input.dispatchEvent(new Event('change',{bubbles:true}));
+    input.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true, key:'0'}));
+  }
+  function flash(el){ el.classList.add('im-flash'); setTimeout(()=>el.classList.remove('im-flash'),280); }
 
   function findAmountInputForRow(row){
     const li=rowWrapper(row);
-    const candidates=Array.from(li.querySelectorAll(SEL.amountInputs)).filter(inp=>{
+    const list = Array.from(li.querySelectorAll(SEL.amountInputs)).filter(inp=>{
       if (!(inp instanceof HTMLInputElement)) return false;
-      if (inp.type==='checkbox' || inp.type==='hidden' || inp.disabled) return false;
+      if (inp.type==='checkbox'||inp.type==='hidden'||inp.disabled) return false;
       const r=inp.getBoundingClientRect(); return r.width>0 && r.height>0;
     });
-    if (!candidates.length) return null;
-    const show=row.querySelector(SEL.showBtn);
-    return candidates.sort((a,b)=>{
+    if (!list.length) return null;
+    const toggle=row.querySelector(SEL.showBtn);
+    return list.sort((a,b)=>{
       const an=a.type==='number'?0:1, bn=b.type==='number'?0:1;
       if (an!==bn) return an-bn;
-      if (show){
-        const ra=show.getBoundingClientRect(), raCx=ra.left+ra.width/2, raCy=ra.top+ra.height/2;
-        const d=(el)=>{const rb=el.getBoundingClientRect(); return Math.hypot(raCx-(rb.left+rb.width/2), raCy-(rb.top+rb.height/2));};
+      if (toggle){
+        const tr=toggle.getBoundingClientRect(), cx=tr.left+tr.width/2, cy=tr.top+tr.height/2;
+        const d=(x)=>{const r=x.getBoundingClientRect(); return Math.hypot(cx-(r.left+r.width/2), cy-(r.top+r.height/2));};
         return d(a)-d(b);
       }
       return 0;
@@ -95,7 +94,7 @@
     const btns=Array.from(li.querySelectorAll(SEL.buyButtons)).filter(b=>{
       const txt=(b.textContent||'').trim().toLowerCase();
       if (!txt) return false;
-      if (/show\s*buy/i.test(txt)) return false; // the toggle
+      if (/show\s*buy/i.test(txt)) return false;
       return /buy|confirm|purchase/.test(txt);
     });
     const visible=btns.filter(b=>b.getBoundingClientRect().width>0 && b.getBoundingClientRect().height>0);
@@ -105,81 +104,64 @@
   async function ensureControlsOpen(row){
     const show=row.querySelector(SEL.showBtn);
     if (show) show.click();
-    // Wait a moment for the panel to mount
     for (let i=0;i<20;i++){ // ~400ms
       await sleep(20);
-      if (findAmountInputForRow(row)) return;
+      if (findAmountInputForRow(row)) break;
     }
   }
 
-  async function fillMaxThenMorph(row, btn){
-    const qtyCell=row.querySelector(SEL.qtyCell);
-    const unitPrice=parseMoney(row.querySelector(SEL.price)?.textContent);
-    const qty=toInt(qtyCell?.textContent);
-    const wallet=readWalletHeader();
-    const afford=computeAfford(wallet, unitPrice, qty);
-
-    await ensureControlsOpen(row);
-
-    // Wait for input up to 3s
-    let input=null, t0=performance.now();
-    while (!input && performance.now()-t0<3000){
-      await sleep(40);
-      input=findAmountInputForRow(row);
-    }
-    if (!input){ alert('Could not find amount input for this listing.'); return false; }
-
-    setInputValue(input, afford>0?afford:'');
-    if (afford<=0) input.placeholder='Insufficient funds';
-    input.scrollIntoView({block:'center', inline:'nearest', behavior:'instant'});
-    flash(input); input.focus();
-
-    // Morph to BUY
-    btn.classList.add('is-buy');
-    const native=await waitForNativeBuy(row, 1500);
-    btn.textContent=(native?.textContent||'Buy').trim() || 'Buy';
-    return true;
-  }
-
-  async function waitForNativeBuy(row, timeoutMs){
+  // ---- core: place an overlay over the native Buy ----
+  async function placeOverlayOnBuy(row){
+    // Wait for native Buy to exist/mount
+    let native=null;
     const t0=performance.now();
-    let btn=null;
-    while (!btn && performance.now()-t0<timeoutMs){
-      btn=findNativeBuyButton(row);
-      if (btn) break;
-      await sleep(40);
+    while (!native && performance.now()-t0<3000){
+      native = findNativeBuyButton(row);
+      if (!native){ await ensureControlsOpen(row); await sleep(60); }
     }
-    return btn;
-  }
+    if (!native) return;
 
-  function ensureFillBuyButton(row){
-    const qtyCell=row.querySelector(SEL.qtyCell);
-    if (!qtyCell) return;
-    qtyCell.classList.add('im-available-cell');
+    // Make the native button's container a positioning context
+    const container = native.parentElement || row;
+    const cs = getComputedStyle(container);
+    if (cs.position === 'static') container.style.position = 'relative';
 
-    let btn=qtyCell.querySelector(':scope > .im-fillbuy');
-    if (btn) return;
+    // Avoid duplicates
+    if (container.querySelector(':scope > .im-fill-overlay')) return;
 
-    btn=document.createElement('button');
-    btn.type='button';
-    btn.className='im-fillbuy';
-    btn.textContent='Fill Max';
-    qtyCell.appendChild(btn);
+    // Create overlay
+    const overlay = document.createElement('button');
+    overlay.type='button';
+    overlay.className='im-fill-overlay';
+    overlay.textContent='Fill Max';
+    container.appendChild(overlay);
 
-    btn.addEventListener('click', async ()=>{
-      // If Fill mode -> perform fill, then morph
-      if (!btn.classList.contains('is-buy')){
-        const ok=await fillMaxThenMorph(row, btn);
-        if (!ok) return;
-        return;
+    overlay.addEventListener('click', async ()=>{
+      // Calculate max
+      const unitPrice = parseMoney(row.querySelector(SEL.price)?.textContent);
+      const qtyText = row.querySelector(SEL.qtyCell || 'div[class*="available"]')?.textContent;
+      const qty = toInt(qtyText);
+      const wallet = getWalletFromHeader();
+      const afford = computeAfford(wallet, unitPrice, qty);
+
+      // Ensure controls and set value
+      await ensureControlsOpen(row);
+      let input=null, t0=performance.now();
+      while (!input && performance.now()-t0<3000){
+        await sleep(40);
+        input=findAmountInputForRow(row);
       }
-      // If Buy mode -> forward your click to native button
-      const native=await waitForNativeBuy(row, 1500);
-      if (!native){ alert('Buy button not found. Try clicking the row’s “Show Buy” then press Buy again.'); return; }
-      native.scrollIntoView({block:'center', inline:'nearest', behavior:'instant'});
-      // Trigger both .click() and a bubbled MouseEvent for safety
-      try { native.click(); } catch {}
-      native.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+      if (!input){ alert('Could not find amount input for this listing.'); return; }
+
+      setInputValue(input, afford>0?afford:'');
+      if (afford<=0) input.placeholder='Insufficient funds';
+      input.scrollIntoView({block:'center', inline:'nearest', behavior:'instant'});
+      flash(input); input.focus();
+
+      // Remove overlay so the real Buy is now clickable
+      overlay.remove();
+      // Optional: focus the real Buy so you can just press Enter/Space
+      native.focus();
     });
   }
 
@@ -188,8 +170,11 @@
     return Array.from(list.querySelectorAll(`${SEL.rowWrapper} > ${SEL.row}`)).filter(r=>r.offsetParent!==null);
   }
 
-  function updateAll(){
-    for (const row of rows()) ensureFillBuyButton(row);
+  async function updateAll(){
+    for (const row of rows()){
+      // If buy controls aren’t open yet, we’ll still try to place once Buy mounts
+      placeOverlayOnBuy(row);
+    }
   }
 
   const mo=new MutationObserver(()=>{ if (mo._raf) cancelAnimationFrame(mo._raf);
@@ -197,4 +182,5 @@
   mo.observe(document.documentElement,{childList:true,subtree:true});
   setTimeout(updateAll,200);
   setTimeout(updateAll,800);
+  setInterval(updateAll,2000); // keep trying as rows mount
 })();
