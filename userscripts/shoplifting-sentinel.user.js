@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Shoplifting Sentinel (Full-Screen Flash Alerts)
 // @namespace    https://github.com/BazookaJoe58
-// @version      1.0.7
-// @description  Full-screen flashing alert when selected shoplifting securities are down. Per-store toggles for BOTH / Camera / Guards, draggable UI, API key input, interval control. (Public API key only.) Flash is click-through; Acknowledge box stays clickable. Panel hidden by default; open via side tab or status-bar "S" icon. Includes a 15-minute global Snooze. Now optimized to avoid page slowdowns.
+// @version      1.0.8
+// @description  Full-screen flashing alert when selected shoplifting securities are down. Per-store toggles for BOTH / Camera / Guards, draggable UI, API key input, interval control. (Public API key only.) Flash is click-through; Acknowledge box stays clickable. Panel hidden by default; open via side tab or status-bar "S" icon. Includes a 15-minute global Snooze. Robust open/close with viewport clamping.
 // @author       BazookaJoe
 // @match        https://www.torn.com/*
 // @run-at       document-end
@@ -122,6 +122,34 @@
   }
   function toast(msg) { try { if (typeof GM_notification === 'function') GM_notification({ title: 'Shoplifting Sentinel', text: msg, timeout: 2500 }); } catch {} }
 
+  // Viewport clamp: keep panel in-bounds when opening
+  function clampIntoViewport(el) {
+    if (!el) return;
+    const pad = 8;
+    const vw = Math.max(document.documentElement.clientWidth, window.innerWidth || 0);
+    const vh = Math.max(document.documentElement.clientHeight, window.innerHeight || 0);
+
+    const rect = el.getBoundingClientRect();
+    // If it's display:none, temporarily show to measure
+    let wasHidden = false;
+    if (el.style.display === 'none') { wasHidden = true; el.style.display = 'block'; }
+    const w = el.offsetWidth || 300;
+    const h = el.offsetHeight || 200;
+    if (wasHidden) el.style.display = 'block'; // keep it open now
+
+    // Use left/top if set; otherwise fallback to computed right anchoring
+    const hasLeft = el.style.left && el.style.left !== 'auto';
+    let left = hasLeft ? el.offsetLeft : (vw - w - 70); // right:70px equivalent
+    let top  = el.offsetTop || 100;
+
+    left = Math.max(pad, Math.min(left, vw - w - pad));
+    top  = Math.max(pad, Math.min(top, vh - h - pad));
+
+    el.style.left = left + 'px';
+    el.style.top  = top + 'px';
+    el.style.right = 'auto';
+  }
+
   // ------------------------ Flash + Modal ------------------------
   function ensureFlash() {
     let el = document.getElementById('tsentinel-flash');
@@ -194,7 +222,8 @@
     const wrap = document.createElement('div');
     wrap.id = 'tsentinel-wrap';
     wrap.style.display = 'none';
-    // restore position if we have it
+
+    // restore position if we have it; if invalid we'll clamp on open
     try {
       const pos = loadJSON(SKEY.pos, null);
       if (pos && typeof pos.x === 'number' && typeof pos.y === 'number') {
@@ -234,7 +263,7 @@
     `;
     document.body.appendChild(wrap);
 
-    // Draggable (save position sparingly)
+    // Draggable (with throttled save)
     (function makeDraggable() {
       const header = wrap.querySelector('#tsentinel-header');
       let sx=0, sy=0, ox=0, oy=0, dragging=false, saveTO=null;
@@ -312,38 +341,33 @@
     GM_setValue(SKEY.lastOpen, open ? 'open' : 'closed');
     LAST_OPEN = open ? 'open' : 'closed';
   }
+  function getPanel() { return document.getElementById('tsentinel-wrap'); }
   function openPanel() {
-    const panel = document.getElementById('tsentinel-wrap') || (buildPanel(), document.getElementById('tsentinel-wrap'));
+    const panel = getPanel() || (buildPanel(), getPanel());
     if (!panel) return;
-    panel.style.display = '';
+    panel.style.display = 'block';
+    clampIntoViewport(panel);
     updateSideTabLabel();
   }
   function closePanel() {
-    const panel = document.getElementById('tsentinel-wrap');
+    const panel = getPanel();
     if (panel) panel.style.display = 'none';
     updateSideTabLabel();
   }
   function togglePanel() {
-    const panel = document.getElementById('tsentinel-wrap') || (buildPanel(), document.getElementById('tsentinel-wrap'));
+    const panel = getPanel() || (buildPanel(), getPanel());
     if (!panel) return;
-    panel.style.display = (panel.style.display === 'none') ? '' : 'none';
+    const willOpen = (panel.style.display === 'none' || !panel.style.display);
+    if (willOpen) {
+      panel.style.display = 'block';
+      clampIntoViewport(panel);
+    } else {
+      panel.style.display = 'none';
+    }
     updateSideTabLabel();
   }
 
   // ------------------------ Rendering ------------------------
-  let lastRenderedKey = ''; // hash of last shop snapshot to avoid re-render churn
-  function hashShops(entries) {
-    // compact hash: store|cam|guard;...
-    return entries.map(({key,status}) => {
-      let cam = 0, grd = 0;
-      status.forEach(d => {
-        const t = (d.title || '').toLowerCase();
-        if (t.includes('camera')) cam = d.disabled ? 1 : 2; // 1=down,2=up
-        if (t.includes('guard'))  grd = d.disabled ? 1 : 2;
-      });
-      return `${key}|${cam}|${grd}`;
-    }).join(';');
-  }
   function renderStores(list, $storesEl) {
     const $stores = $storesEl || document.getElementById('tsentinel-stores');
     if (!$stores) return;
@@ -403,7 +427,7 @@
   }
 
   // ------------------------ Polling & API ------------------------
-  let timer = null, busy = false, lastSnapshot = null;
+  let timer = null, busy = false;
 
   function startPolling() { stopPolling(); timer = setInterval(pingNow, Math.max(5, CFG.intervalSec) * 1000); pingNow(); }
   function stopPolling() { if (timer) { clearInterval(timer); timer = null; } }
@@ -429,16 +453,11 @@
       const raw = await fetchShoplifting();
       const entries = Object.entries(raw).map(([key, status]) => ({ key, status }));
 
-      // Only re-render if something changed
-      const h = hashShops(entries);
-      if (h !== lastRenderedKey) {
-        lastRenderedKey = h;
-        lastSnapshot = entries;
-        saveJSON(SKEY.lastShops, entries);
-        renderStores(entries, $storesEl);
-      }
+      // cache + render
+      saveJSON(SKEY.lastShops, entries);
+      renderStores(entries, $storesEl);
 
-      // Decide alerts
+      // alerts
       const now = nowSec();
       const snoozed = CFG.snoozeUntil > now;
 
@@ -488,39 +507,23 @@
     } finally { busy = false; }
   }
 
-  // ------------------------ Bootstrap (lightweight) ------------------------
+  // ------------------------ Bootstrap ------------------------
   function ready(fn) {
     if (document.readyState === 'complete' || document.readyState === 'interactive') return fn();
     document.addEventListener('DOMContentLoaded', fn, { once: true });
   }
   ready(() => {
-    // Build once
     buildPanel();
     buildSideTab();
 
-    // Status bar icon: try once, and retry a couple of times with small backoff—not every mutation
-    let iconTries = 0;
+    // Status bar icon: try a few times on load
+    let tries = 0;
     (function tryIcon() {
       if (builtIcon) return;
       buildStatusIcon();
-      if (!builtIcon && iconTries++ < 3) setTimeout(tryIcon, 800);
+      if (!builtIcon && tries++ < 3) setTimeout(tryIcon, 800);
     })();
 
-    // Debounced, minimal MutationObserver (no subtree scan)
-    let mo, debTO = null;
-    const onMut = () => {
-      if (debTO) return;
-      debTO = setTimeout(() => {
-        debTO = null;
-        if (!builtPanel && document.body) buildPanel();
-        if (!builtTab) buildSideTab();
-        if (!builtIcon) buildStatusIcon();
-      }, 500);
-    };
-    mo = new MutationObserver(onMut);
-    if (document.body) mo.observe(document.body, { childList: true }); // no subtree
-
-    // Start polling if enabled
     if (CFG.enabled) startPolling();
   });
 })();
