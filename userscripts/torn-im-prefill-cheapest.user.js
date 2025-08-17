@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Item Market — Prefill (Right 25% Fill Max Overlay)
+// @name         Torn Item Market — Prefill (Right 25% Fill Max Overlay, Pre-Open)
 // @namespace    https://torn.city/
-// @version      2.5.0
-// @description  Rightmost 25% "Fill Max" overlay aligned to native Buy/Confirm (anchored to parent). Hard no-scroll (locks viewport, patches scrollIntoView/scrollTo), fills max affordable, then overlay drops behind so native Buy is clickable. No confirm bypass.
+// @version      2.6.0
+// @description  Pre-opens buy controls (no-scroll), then shows a right-aligned 25% "Fill Max" overlay on native Buy/Confirm. Click to fill max affordable, overlay drops behind so native Buy is clickable. No confirm bypass on Torn dialogs.
 // @author       Baz
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
@@ -14,22 +14,22 @@
 (function () {
   'use strict';
 
-  // ---------- Styles ----------
+  // ---------- Styling ----------
   GM_addStyle(`
     .im-fill-overlay {
-      position:absolute;
-      display:flex; align-items:center; justify-content:center;
-      cursor:pointer; font-size:11px; font-weight:600;
+      position: absolute;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; font-size: 11px; font-weight: 600;
       z-index: 9;
       background: rgba(22,163,74,.12);
       color: #16a34a;
       border-left: 1px solid #16a34a;
       border-radius: 0 8px 8px 0;
-      pointer-events:auto; user-select:none; -webkit-user-select:none;
+      pointer-events: auto; user-select: none; -webkit-user-select: none;
     }
-    .im-fill-overlay:hover { background: rgba(22,163,74,.2) }
-    .im-fill-overlay.im-done { z-index:-1; pointer-events:none; background:transparent; border-color:transparent }
-    .im-flash { box-shadow:0 0 0 3px rgba(0,160,255,.55)!important; transition:box-shadow .25s ease }
+    .im-fill-overlay:hover { background: rgba(22,163,74,.20); }
+    .im-fill-overlay.im-done { z-index: -1; pointer-events: none; background: transparent; border-color: transparent; }
+    .im-flash { box-shadow: 0 0 0 3px rgba(0,160,255,.55)!important; transition: box-shadow .25s ease; }
   `);
 
   // ---------- Selectors ----------
@@ -49,82 +49,6 @@
   const toInt = (s)=>{ const m=String(s||'').match(/\d[\d,]*/); return m?Number(m[0].replace(/[^\d]/g,'')):NaN; };
   const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
   const rowWrap = (row)=>row.closest(SEL.rowWrapper) || row.closest('li') || document.body;
-
-  // Ultra-hard scroll lock (prevents any auto-centering)
-  async function withNoScrollHard(fn){
-    const x = window.scrollX, y = window.scrollY;
-
-    // CSS: kill smooth behavior
-    let styleNode = document.getElementById('im-nosmooth-style');
-    if (!styleNode){
-      styleNode = document.createElement('style');
-      styleNode.id = 'im-nosmooth-style';
-      styleNode.textContent = `html,body{scroll-behavior:auto!important;}`;
-      document.head.appendChild(styleNode);
-    }
-
-    // Freeze viewport: lock body position
-    const body = document.body;
-    const prevBodyCss = {
-      position: body.style.position,
-      top: body.style.top,
-      left: body.style.left,
-      width: body.style.width,
-      overflow: body.style.overflow,
-    };
-    body.style.position = 'fixed';
-    body.style.top = `-${y}px`;
-    body.style.left = `-${x}px`;
-    body.style.width = '100%';
-    body.style.overflow = 'hidden';
-
-    // Patch programmatic scroll calls
-    const ElementProto = Element.prototype;
-    const origSIV = ElementProto.scrollIntoView;
-    const origScrollTo = window.scrollTo;
-
-    ElementProto.scrollIntoView = function noop(){ /* blocked */ };
-    window.scrollTo = function lockedScrollTo(){ /* blocked */ };
-
-    // Block user inputs that cause scroll
-    const blockEvt = e => { e.preventDefault(); e.stopPropagation(); };
-    const unblockers = [
-      ['wheel', {passive:false, capture:true}],
-      ['touchmove', {passive:false, capture:true}],
-      ['keydown', {capture:true}],
-    ];
-    const keyBlocker = e => {
-      if (['ArrowUp','ArrowDown','PageUp','PageDown','Home','End',' '].includes(e.key)) blockEvt(e);
-    };
-    window.addEventListener('wheel', blockEvt, {passive:false, capture:true});
-    window.addEventListener('touchmove', blockEvt, {passive:false, capture:true});
-    window.addEventListener('keydown', keyBlocker, {capture:true});
-
-    try {
-      // Ensure snapped to current pos
-      window.scrollTo(x, y);
-      const out = await fn();
-      return out;
-    } finally {
-      // Restore patches & CSS & position
-      ElementProto.scrollIntoView = origSIV;
-      window.scrollTo = origScrollTo;
-
-      window.removeEventListener('wheel', blockEvt, {capture:true});
-      window.removeEventListener('touchmove', blockEvt, {capture:true});
-      window.removeEventListener('keydown', keyBlocker, {capture:true});
-
-      // Restore body lock -> actual scroll position
-      body.style.position = prevBodyCss.position;
-      body.style.top = prevBodyCss.top;
-      body.style.left = prevBodyCss.left;
-      body.style.width = prevBodyCss.width;
-      body.style.overflow = prevBodyCss.overflow;
-
-      // Re-apply original scroll
-      window.scrollTo(x, y);
-    }
-  }
 
   function getWalletFromHeader(){
     const root=document.querySelector('#topRoot')||document.body;
@@ -165,7 +89,7 @@
     const btns=Array.from(li.querySelectorAll(SEL.buyButtons)).filter(b=>{
       const txt=(b.textContent||'').trim().toLowerCase();
       if (!txt) return false;
-      if (/show\s*buy/i.test(txt)) return false; // toggle
+      if (/show\s*buy/i.test(txt)) return false; // skip the toggle
       return /buy|confirm|purchase/.test(txt);
     });
     const visible = btns.find(b=>b.getBoundingClientRect().width>0 && b.getBoundingClientRect().height>0);
@@ -175,10 +99,11 @@
   async function ensureControlsOpen(row){
     const show=row.querySelector(SEL.showBtn);
     if (show) show.click();
+    // wait a bit for inputs to mount
     for (let i=0;i<20;i++){ await sleep(20); if (findAmountInputForRow(row)) break; }
   }
 
-  // Position overlay relative to the Buy button, but anchored in the button's parent container.
+  // ---------- Overlay positioning (anchored to Buy's parent) ----------
   function positionOverlayOverRightQuarter(overlay, nativeBtn){
     const parent = overlay.parentElement;
     if (!parent) return;
@@ -190,8 +115,8 @@
     const w    = btnRect.width;
     const h    = btnRect.height;
 
-    const ow   = Math.max(24, Math.round(w * 0.25));
-    const ox   = left + (w - ow);
+    const ow   = Math.max(24, Math.round(w * 0.25)); // 25% width
+    const ox   = left + (w - ow);                    // rightmost quarter
 
     overlay.style.top    = `${top}px`;
     overlay.style.left   = `${ox}px`;
@@ -200,11 +125,12 @@
     overlay.style.borderRadius = '0 8px 8px 0';
   }
 
-  // ---------- Core: overlay ----------
+  // ---------- Create overlay (no scroll lock on click) ----------
   async function placeOverlay(row){
+    // find Buy/Confirm
     let native=null;
-    const start=performance.now();
-    while (!native && performance.now()-start<3000){
+    const t0=performance.now();
+    while (!native && performance.now()-t0<3000){
       native = findNativeBuyButton(row);
       if (!native){ await ensureControlsOpen(row); await sleep(60); }
     }
@@ -212,49 +138,43 @@
 
     const container = native.parentElement || row;
     if (getComputedStyle(container).position === 'static') container.style.position='relative';
-
     if (container.querySelector(':scope > .im-fill-overlay')) return;
 
-    const overlay = document.createElement('div');
-    overlay.className = 'im-fill-overlay';
+    const overlay=document.createElement('div');
+    overlay.className='im-fill-overlay';
     overlay.setAttribute('role','button');
     overlay.setAttribute('aria-label','Fill Max');
     overlay.setAttribute('tabindex','-1');
-    overlay.textContent = 'Fill Max';
+    overlay.textContent='Fill Max';
 
-    // Initial & reactive positioning
     positionOverlayOverRightQuarter(overlay, native);
+
     const ro = new ResizeObserver(()=>positionOverlayOverRightQuarter(overlay, native));
-    ro.observe(container);
-    ro.observe(native);
+    ro.observe(container); ro.observe(native);
     const realign = ()=>positionOverlayOverRightQuarter(overlay, native);
     window.addEventListener('scroll', realign, {passive:true});
     const mo = new MutationObserver(()=>positionOverlayOverRightQuarter(overlay, native));
     mo.observe(container, {attributes:true, childList:false, subtree:false});
 
-    // Block native interactions
     overlay.addEventListener('mousedown', (e)=>{ e.preventDefault(); e.stopPropagation(); }, {capture:true});
-    overlay.addEventListener('click', (e)=>{
+    overlay.addEventListener('click', async (e)=>{
       e.preventDefault(); e.stopPropagation();
 
-      withNoScrollHard(async ()=>{
-        const unitPrice=parseMoney(row.querySelector(SEL.price)?.textContent);
-        const qtyText=row.querySelector(SEL.qtyCell)?.textContent;
-        const qty=toInt(qtyText);
-        const wallet=getWalletFromHeader();
-        const afford=computeAfford(wallet,unitPrice,qty);
+      // No scroll lock here — controls already open from pre-open phase
+      const unitPrice=parseMoney(row.querySelector(SEL.price)?.textContent);
+      const qtyText=row.querySelector(SEL.qtyCell)?.textContent;
+      const qty=toInt(qtyText);
+      const wallet=getWalletFromHeader();
+      const afford=computeAfford(wallet,unitPrice,qty);
 
-        await ensureControlsOpen(row);
+      const input=findAmountInputForRow(row);
+      if (!input) return;
 
-        const input=findAmountInputForRow(row);
-        if (!input) return;
+      setInputValue(input, afford>0?afford:'');
+      if (afford<=0) input.placeholder='Insufficient funds';
+      flash(input);
 
-        setInputValue(input, afford>0?afford:'');
-        if (afford<=0) input.placeholder='Insufficient funds';
-        flash(input);
-
-        overlay.classList.add('im-done');
-      });
+      overlay.classList.add('im-done'); // drop behind so native Buy is clickable
     }, {capture:true});
 
     const killKeys = (e)=>{
@@ -275,17 +195,45 @@
       .filter(r=>r.offsetParent!==null);
   }
 
-  function refresh(){
+  // ---------- Pre-open top N rows (to prevent Torn's auto-center later) ----------
+  async function preOpenTopRows(n=20){
+    const rows=getRows().slice(0, n);
+    // Hard no-scroll while opening
+    const x=window.scrollX, y=window.scrollY;
+    const body=document.body;
+    const prev={ position:body.style.position, top:body.style.top, left:body.style.left, width:body.style.width, overflow:body.style.overflow };
+    body.style.position='fixed'; body.style.top=`-${y}px`; body.style.left=`-${x}px`; body.style.width='100%'; body.style.overflow='hidden';
+    const ElementProto = Element.prototype;
+    const origSIV = ElementProto.scrollIntoView;
+    ElementProto.scrollIntoView = function noop(){};
+    try{
+      for (const row of rows){ await ensureControlsOpen(row); }
+    } finally {
+      ElementProto.scrollIntoView = origSIV;
+      body.style.position=prev.position; body.style.top=prev.top; body.style.left=prev.left; body.style.width=prev.width; body.style.overflow=prev.overflow;
+      window.scrollTo(x,y);
+    }
+  }
+
+  async function refresh(){
     for (const row of getRows()) placeOverlay(row);
   }
 
+  // ---------- Bootstrap ----------
+  (async ()=>{
+    // Give the list a tick to render
+    await sleep(300);
+    await preOpenTopRows(20);   // adjust count if you want more/less pre-opened
+    await refresh();
+  })();
+
+  // Keep overlays in sync with React updates
   const docMO=new MutationObserver(()=>{
     if (docMO._raf) cancelAnimationFrame(docMO._raf);
     docMO._raf=requestAnimationFrame(()=>setTimeout(refresh,30));
   });
   docMO.observe(document.documentElement,{childList:true,subtree:true});
 
-  setTimeout(refresh,200);
-  setTimeout(refresh,800);
-  setInterval(refresh,2000);
+  // periodic safety net
+  setInterval(refresh, 2000);
 })();
