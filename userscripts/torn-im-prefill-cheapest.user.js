@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Item Market — Prefill + Buy/Fill Max (List View + API wallet)
+// @name         Torn Item Market — Fill Max & Buy Max
 // @namespace    https://torn.city/
-// @version      1.3.0
-// @description  Afford badges, Fill Max in Qty cell, Buy Max per row. Uses Torn API (user?selections=money) if set; header fallback. No confirmation bypass; stays compliant.
+// @version      2.0.0
+// @description  Adds “Fill Max” (in Qty cell) and “Buy Max” (per row). Uses Torn API (user?selections=money) if set; falls back to header wallet. No confirmation bypass.
 // @author       BazookaJoe
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
@@ -20,36 +20,27 @@
 (function () {
   'use strict';
 
-  // ---------- Styles ----------
+  // ---------- Styles (minimal) ----------
   GM_addStyle(`
-    .im-afford-badge{display:inline-block;margin-left:8px;padding:2px 6px;font-size:11px;line-height:1.2;border-radius:999px;
-      background:rgba(20,20,20,.9);color:#cfead6;border:1px solid rgba(120,200,160,.45);white-space:nowrap;vertical-align:middle}
-    .im-afford-badge.im-zero{color:#f7d5d5;border-color:rgba(220,120,120,.5)}
-    .im-flash{box-shadow:0 0 0 3px rgba(0,160,255,.55)!important;transition:box-shadow .25s ease}
-    .im-cheapest-row{outline:2px dashed rgba(34,197,94,.55);outline-offset:2px;border-radius:6px}
-
-    .im-api-pill{position:fixed;right:10px;bottom:10px;z-index:999999;background:#0f172a;color:#e5f1ff;border:1px solid #334155;
-      border-radius:999px;padding:4px 8px;font-size:11px;cursor:pointer}
-    .im-api-pill.ok{border-color:#22c55e}.im-api-pill.err{border-color:#ef4444}
-
     .im-buymax{margin-left:6px;padding:2px 8px;font-size:11px;border-radius:8px;border:1px solid #374151;background:#101827;color:#e5e7eb;cursor:pointer}
-    .im-buymax:hover{filter:brightness(1.1)}
+    .im-buymax:hover{filter:brightness(1.08)}
     .im-buymax[disabled]{opacity:.5;cursor:not-allowed}
 
     .im-available-cell{position:relative}
     .im-fillmax{position:absolute;top:20px;right:7px;padding:2px 6px;font-size:11px;border-radius:8px;border:1px solid var(--tt-color-green, #16a34a);
       color:var(--tt-color-green, #16a34a);background:transparent;cursor:pointer;line-height:1.1}
     body:not(.tt-mobile):not(.tt-tablet) .im-fillmax:hover{color:#fff;background:var(--tt-color-green, #16a34a)}
+
+    .im-flash{box-shadow:0 0 0 3px rgba(0,160,255,.55)!important;transition:box-shadow .25s ease}
   `);
 
-  // ---------- Selectors (from your DOM) ----------
+  // ---------- Selectors ----------
   const SEL = {
     list: 'ul[class*="sellerList"]',
     rowWrapper: 'li[class*="rowWrapper"]',
     row: 'div[class*="sellerRow"]',
     price: 'div[class*="price"]',
     qtyCell: 'div[class*="available"]',
-    qtyText: 'div[class*="available"]',
     showBtn: 'button[class*="showBuyControlsButton"]',
     amountInputs: 'input:not([type="checkbox"]):not([type="hidden"])',
     buyButtons: 'button, a',
@@ -69,22 +60,17 @@
   const flash = (el)=>{ el.classList.add('im-flash'); setTimeout(()=>el.classList.remove('im-flash'),280); };
   const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
 
-  // ---------- API wallet (optional) ----------
-  const KEY_STORE='torn_api_key_prefill_v1';
+  // ---------- Optional Torn API wallet ----------
+  const KEY_STORE='torn_api_key_fillbuy_v1';
   let apiKey=GM_getValue(KEY_STORE,'');
-  const apiPill=document.createElement('div'); apiPill.className='im-api-pill'; apiPill.textContent='API: off';
-  document.body.appendChild(apiPill);
-  apiPill.addEventListener('click', ()=>promptSetKey());
   GM_registerMenuCommand('Set Torn API Key…', ()=>promptSetKey());
-  GM_registerMenuCommand('Clear Torn API Key', ()=>{ apiKey=''; GM_setValue(KEY_STORE,''); WALLET_CACHE={val:NaN,t:0}; apiPill.className='im-api-pill'; apiPill.textContent='API: off'; alert('API key cleared.'); });
+  GM_registerMenuCommand('Clear Torn API Key', ()=>{ apiKey=''; GM_setValue(KEY_STORE,''); WALLET_CACHE={val:NaN,t:0}; alert('API key cleared.'); });
 
   async function promptSetKey(){
     const k=prompt('Enter your Torn API key (stored locally in Tampermonkey):', apiKey||'');
     if (k===null) return;
     apiKey=(k||'').trim(); GM_setValue(KEY_STORE,apiKey); WALLET_CACHE={val:NaN,t:0};
-    if (apiKey){ try{ await readWalletAPI(); apiPill.classList.add('ok'); apiPill.classList.remove('err'); apiPill.textContent='API: on'; }
-      catch{ apiPill.classList.remove('ok'); apiPill.classList.add('err'); apiPill.textContent='API: error'; } }
-    else { apiPill.className='im-api-pill'; apiPill.textContent='API: off'; }
+    if (apiKey){ try{ await readWalletAPI(); alert('API key OK.'); }catch{ alert('API key error. Falling back to header wallet.'); } }
   }
 
   const httpGetJSON=(url)=>new Promise((res,rej)=>GM_xmlhttpRequest({method:'GET',url,headers:{Accept:'application/json'},
@@ -108,9 +94,8 @@
   }
   async function getWallet(){
     if (apiKey){
-      try{ const v=await readWalletAPI(); apiPill.classList.add('ok'); apiPill.classList.remove('err'); apiPill.textContent='API: on'; return v; }
-      catch{ apiPill.classList.remove('ok'); apiPill.classList.add('err'); apiPill.textContent='API: error'; }
-    } else { apiPill.classList.remove('ok','err'); apiPill.textContent='API: off'; }
+      try{ return await readWalletAPI(); }catch{/* fall through to header */ }
+    }
     return readWalletHeader();
   }
 
@@ -160,16 +145,7 @@
     return Math.max(0, Math.min(Math.floor(wallet/unitPrice), qty));
   };
 
-  const ensureAffordBadge = (row, afford) => {
-    const btn=row.querySelector(SEL.showBtn) || row;
-    let badge=(btn.nextElementSibling && btn.nextElementSibling.classList?.contains('im-afford-badge')) ? btn.nextElementSibling : null;
-    if (!badge){ badge=document.createElement('span'); badge.className='im-afford-badge'; btn.insertAdjacentElement('afterend', badge); }
-    badge.textContent=`Afford: ${Number(afford).toLocaleString()}`;
-    badge.classList.toggle('im-zero', afford===0);
-    return badge;
-  };
-
-  // ---------- Fill Max button (in Qty cell) ----------
+  // ---------- Feature 1: Fill Max (in Qty cell) ----------
   function ensureFillMax(row){
     const qtyCell=row.querySelector(SEL.qtyCell);
     if (!qtyCell) return;
@@ -184,9 +160,8 @@
       qtyCell.appendChild(btn);
 
       btn.addEventListener('click', async ()=>{
-        const priceEl=row.querySelector(SEL.price);
-        const unitPrice=parseMoney(priceEl?.textContent);
-        const qty=toInt(row.querySelector(SEL.qtyText)?.textContent);
+        const unitPrice=parseMoney(row.querySelector(SEL.price)?.textContent);
+        const qty=toInt(qtyCell?.textContent);
         const wallet=await getWallet();
         const afford=computeAfford(wallet, unitPrice, qty);
 
@@ -199,6 +174,7 @@
           input=findAmountInputForRow(row);
         }
         if (!input){ alert('Could not find amount input for this listing.'); return; }
+
         setInputValue(input, afford>0?afford:'');
         if (afford<=0) input.placeholder='Insufficient funds';
         flash(input); input.focus();
@@ -206,7 +182,7 @@
     }
   }
 
-  // ---------- Buy Max button (per row) ----------
+  // ---------- Feature 2: Buy Max (per row) ----------
   function ensureBuyMaxButton(row){
     const anchor=row.querySelector(SEL.showBtn) || row;
     let buyMax = (anchor.parentElement && anchor.parentElement.querySelector?.(':scope > .im-buymax')) || null;
@@ -216,14 +192,14 @@
       buyMax.className='im-buymax';
       buyMax.textContent='Buy Max';
       anchor.insertAdjacentElement('afterend', buyMax);
+
       buyMax.addEventListener('click', async (e)=>{
         buyMax.disabled=true;
         try{
           const unitPrice=parseMoney(row.querySelector(SEL.price)?.textContent);
-          const qty=toInt(row.querySelector(SEL.qtyText)?.textContent);
+          const qty=toInt(row.querySelector(SEL.qtyCell)?.textContent || row.querySelector(SEL.qtyCell)?.textContent);
           const wallet=await getWallet();
           const afford=computeAfford(wallet, unitPrice, qty);
-          ensureAffordBadge(row, afford);
 
           const show=row.querySelector(SEL.showBtn);
           if (show) show.click();
@@ -242,49 +218,26 @@
           const nativeBuy=findNativeBuyButton(row);
           if (!nativeBuy){ input.focus(); return; }
           if (e.shiftKey){ nativeBuy.click(); } else { nativeBuy.focus(); }
-        } finally { buyMax.disabled=false; }
+        } finally {
+          buyMax.disabled=false;
+        }
       });
     }
   }
 
-  // ---------- Cheapest row helpers ----------
-  let lastCheapestRow=null;
-  function pickCheapestRow(rows){
-    let best=null, bestPrice=Infinity;
-    for (const row of rows){
-      const p=parseMoney(row.querySelector(SEL.price)?.textContent);
-      if (Number.isFinite(p) && p<bestPrice){ best=row; bestPrice=p; }
-    }
-    return best;
-  }
-  function markCheapest(row){
-    if (lastCheapestRow && lastCheapestRow!==row) lastCheapestRow.classList.remove('im-cheapest-row');
-    if (row){ row.classList.add('im-cheapest-row'); lastCheapestRow=row; }
-  }
-
-  // ---------- Main refresh ----------
-  async function updateAll(){
+  // ---------- Main ----------
+  function updateAll(){
     if (!isMarketPage()) return;
-    const rows=findRows();
-    const cheapest=pickCheapestRow(rows);
-    markCheapest(cheapest);
-
-    const wallet=await getWallet();
+    const rows = findRows();
     for (const row of rows){
-      const unitPrice=parseMoney(row.querySelector(SEL.price)?.textContent);
-      const qty=toInt(row.querySelector(SEL.qtyText)?.textContent);
-      const afford=computeAfford(wallet, unitPrice, qty);
-      ensureAffordBadge(row, afford);
       ensureFillMax(row);
       ensureBuyMaxButton(row);
     }
   }
 
-  // ---------- Observe & kick ----------
   const mo=new MutationObserver(()=>{ if (mo._raf) cancelAnimationFrame(mo._raf);
     mo._raf=requestAnimationFrame(()=>setTimeout(updateAll,30)); });
   mo.observe(document.documentElement,{childList:true,subtree:true});
   setTimeout(updateAll,200);
   setTimeout(updateAll,800);
-  setInterval(updateAll,4000);
 })();
