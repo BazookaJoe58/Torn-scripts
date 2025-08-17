@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Shoplifting Sentinel (Full-Screen Flash Alerts)
 // @namespace    https://github.com/BazookaJoe58
-// @version      1.0.6
-// @description  Full-screen flashing alert when selected shoplifting securities are down. Per-store toggles for BOTH / Camera / Guards, draggable UI, API key input, interval control. (Public API key only.) Flash is click-through; Acknowledge box stays clickable. Panel hidden by default; open via side tab or status-bar "S" icon. Includes a 15-minute global Snooze.
+// @version      1.0.7
+// @description  Full-screen flashing alert when selected shoplifting securities are down. Per-store toggles for BOTH / Camera / Guards, draggable UI, API key input, interval control. (Public API key only.) Flash is click-through; Acknowledge box stays clickable. Panel hidden by default; open via side tab or status-bar "S" icon. Includes a 15-minute global Snooze. Now optimized to avoid page slowdowns.
 // @author       BazookaJoe
 // @match        https://www.torn.com/*
 // @run-at       document-end
@@ -24,7 +24,7 @@
     cfg: 'tsentinel_cfg',
     pos: 'tsentinel_pos',
     lastShops: 'tsentinel_last_shops',
-    lastOpen: 'tsentinel_last_open', // 'open' | 'closed'
+    lastOpen: 'tsentinel_last_open',
   };
 
   const DEFAULT_CFG = {
@@ -36,10 +36,7 @@
     snoozeUntil: 0,                // unix seconds (global snooze)
   };
 
-  function loadJSON(key, fallback) {
-    try { const v = GM_getValue(key); return v ? JSON.parse(v) : fallback; }
-    catch { return fallback; }
-  }
+  function loadJSON(key, fallback) { try { const v = GM_getValue(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; } }
   function saveJSON(key, obj) { GM_setValue(key, JSON.stringify(obj)); }
 
   let CFG = loadJSON(SKEY.cfg, DEFAULT_CFG);
@@ -50,22 +47,17 @@
   GM_addStyle(`
   #tsentinel-wrap {
     position: fixed; z-index: 2147483000; width: 300px; box-sizing: border-box;
-    top: 80px; left: 40px; background: #fff; color: #222; border-radius: 12px;
+    top: 100px; right: 70px; background: #fff; color: #222; border-radius: 12px;
     box-shadow: 0 8px 30px rgba(0,0,0,.25); font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-    display: none; /* hidden by default */
-    flex-direction: column; overflow: hidden; border: 1px solid rgba(0,0,0,.08);
+    display: none; flex-direction: column; overflow: hidden; border: 1px solid rgba(0,0,0,.08);
   }
-  .dark-mode #tsentinel-wrap { color: #000; }
-  #tsentinel-header {
-    background:#f5f5f7; padding:10px 12px; font-weight:700; cursor:move; display:flex; align-items:center; gap:8px;
-  }
+  #tsentinel-header { background:#f5f5f7; padding:10px 12px; font-weight:700; cursor:move; display:flex; align-items:center; gap:8px; }
   #tsentinel-title { flex: 1; font-size: 14px; }
   #tsentinel-controls { display:flex; gap:8px; align-items:center; }
   .tswitch{ display:inline-flex; align-items:center; gap:6px; font-size:12px; cursor:pointer; user-select:none; }
   .tswitch input{ accent-color:#0a7; }
   #tsentinel-body { padding:10px; max-height: 60vh; overflow:auto; }
   #tsentinel-footer { padding:8px 10px; background:#fafafa; display:flex; align-items:center; gap:8px; border-top:1px solid rgba(0,0,0,.06); }
-
   .tlabel { font-size:12px; opacity:.8; }
   .tinput { width: 120px; padding:4px 6px; font-size:12px; border:1px solid #ccc; border-radius:6px; }
   .tbtn { padding:4px 8px; font-size:12px; border:1px solid #ccc; background:#fff; border-radius:6px; cursor:pointer; }
@@ -84,11 +76,11 @@
     position: fixed; inset: 0; z-index: 2147483646; display: none;
     background: rgba(255,0,0,.75);
     animation: tsentinel-pulse 1s ease-in-out infinite;
-    pointer-events: none; /* click-through */
+    pointer-events: none;
   }
   @keyframes tsentinel-pulse { from { opacity: .35; } to { opacity: 1; } }
 
-  /* Center modal that stays clickable */
+  /* Center modal */
   #tsentinel-modal {
     position: fixed; z-index: 2147483647; display: none;
     top: 50%; left: 50%; transform: translate(-50%,-50%);
@@ -100,9 +92,7 @@
   #tsentinel-modal-reason { font-size: 14px; margin-bottom: 12px; line-height: 1.35; }
   #tsentinel-modal-note { font-size: 12px; opacity: .8; margin: 6px 0 0 0; }
   #tsentinel-actions { display:flex; gap:8px; justify-content:center; margin-top: 6px; }
-  #tsentinel-ack, #tsentinel-snooze {
-    border: 0; font-weight: 800; border-radius: 999px; padding: 8px 16px; cursor: pointer; font-size: 14px;
-  }
+  #tsentinel-ack, #tsentinel-snooze { border: 0; font-weight: 800; border-radius: 999px; padding: 8px 16px; cursor: pointer; font-size: 14px; }
   #tsentinel-ack { background: #ffd400; color: #000; }
   #tsentinel-ack:hover { filter: brightness(0.95); }
   #tsentinel-snooze { background: #b0d8ff; color: #003a75; }
@@ -112,7 +102,7 @@
   #tsentinel-icon { width: 18px; height: 18px; cursor:pointer; opacity:.75; border-radius:4px; background:#eaeaea; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; }
   #tsentinel-icon:hover { opacity:1; }
 
-  /* Sticky side tab to toggle the panel */
+  /* Sticky side tab */
   #tsentinel-tab {
     position: fixed; top: 50%; right: 0; transform: translateY(-50%);
     z-index: 2147483645; background: #333; color: #fff; padding: 10px 12px;
@@ -125,15 +115,14 @@
   `);
 
   // ------------------------ Helpers ------------------------
+  const nowSec = () => Math.floor(Date.now() / 1000);
   const nicify = s => String(s).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   function ensureStoreEntry(storeKey) {
-    if (!CFG.storeConfig[storeKey]) {
-      CFG.storeConfig[storeKey] = { both: false, camera: false, guards: false };
-    }
+    if (!CFG.storeConfig[storeKey]) CFG.storeConfig[storeKey] = { both: false, camera: false, guards: false };
   }
-  const nowSec = () => Math.floor(Date.now() / 1000);
+  function toast(msg) { try { if (typeof GM_notification === 'function') GM_notification({ title: 'Shoplifting Sentinel', text: msg, timeout: 2500 }); } catch {} }
 
-  // ------------------------ Flash + Modal (click-through flash) ------------------------
+  // ------------------------ Flash + Modal ------------------------
   function ensureFlash() {
     let el = document.getElementById('tsentinel-flash');
     if (!el) { el = document.createElement('div'); el.id = 'tsentinel-flash'; document.documentElement.appendChild(el); }
@@ -154,14 +143,14 @@
         <div id="tsentinel-modal-note"></div>
       `;
       document.documentElement.appendChild(m);
-      m.querySelector('#tsentinel-ack').addEventListener('click', hideAlert);
+      m.querySelector('#tsentinel-ack').addEventListener('click', hideAlert, { passive: true });
       m.querySelector('#tsentinel-snooze').addEventListener('click', () => {
         CFG.snoozeUntil = nowSec() + 15 * 60;
         saveJSON(SKEY.cfg, CFG);
         updateSnoozeNote();
         hideAlert();
         toast('Alerts snoozed for 15 minutes');
-      });
+      }, { passive: true });
     }
     updateSnoozeNote();
     return m;
@@ -176,12 +165,12 @@
   function startSnoozeTicker() {
     if (snoozeTimer) clearInterval(snoozeTimer);
     snoozeTimer = setInterval(() => {
-      if (CFG.snoozeUntil <= nowSec()) { clearInterval(snoozeTimer); snoozeTimer = null; updateSnoozeNote(); return; }
+      if (CFG.snoozeUntil <= nowSec()) { clearInterval(snoozeTimer); snoozeTimer = null; }
       updateSnoozeNote();
     }, 500);
   }
   function showAlert(reason) {
-    try { if (typeof GM_notification === 'function') GM_notification({ title: 'Shoplifting Sentinel', text: reason || 'Alert', timeout: 4000 }); } catch {}
+    try { if (typeof GM_notification === 'function') GM_notification({ title: 'Shoplifting Sentinel', text: reason || 'Alert', timeout: 3000 }); } catch {}
     ensureFlash().style.display = 'block';
     const modal = ensureModal();
     modal.style.display = 'block';
@@ -195,59 +184,23 @@
     if (flash) flash.style.display = 'none';
     if (modal) modal.style.display = 'none';
   }
-  function toast(msg) {
-    try { if (typeof GM_notification === 'function') GM_notification({ title: 'Shoplifting Sentinel', text: msg, timeout: 2500 }); } catch {}
-  }
-
-  // ------------------------ Panel Open/Close via Tab/Icon ------------------------
-  function getPanel() { return document.getElementById('tsentinel-wrap'); }
-  function ensurePanel() { if (!getPanel()) buildPanel(); return getPanel(); }
-
-  function autoAnchorRight(panel) {
-    // If never positioned before, place near right edge so it's visible next to the side tab
-    if (!panel.dataset.autopos) {
-      panel.style.left = 'auto';
-      panel.style.right = '70px';
-      panel.style.top = '100px';
-      panel.dataset.autopos = '1';
-    }
-  }
-
-  function openPanel() {
-    const panel = ensurePanel();
-    autoAnchorRight(panel);
-    panel.style.display = '';
-    GM_setValue(SKEY.lastOpen, 'open');
-    updateSideTabLabel();
-  }
-  function closePanel() {
-    const panel = getPanel();
-    if (panel) panel.style.display = 'none';
-    GM_setValue(SKEY.lastOpen, 'closed');
-    updateSideTabLabel();
-  }
-  function togglePanel() {
-    const panel = ensurePanel();
-    const nowOpen = panel.style.display !== 'none';
-    if (nowOpen) closePanel(); else openPanel();
-  }
 
   // ------------------------ UI Build ------------------------
+  let builtPanel = false;
   function buildPanel() {
-    if (document.getElementById('tsentinel-wrap')) return;
+    if (builtPanel) return;
+    builtPanel = true;
 
     const wrap = document.createElement('div');
     wrap.id = 'tsentinel-wrap';
-    wrap.style.display = 'none'; // hidden by default
-
+    wrap.style.display = 'none';
     // restore position if we have it
     try {
       const pos = loadJSON(SKEY.pos, null);
       if (pos && typeof pos.x === 'number' && typeof pos.y === 'number') {
         wrap.style.left = pos.x + 'px';
         wrap.style.top = pos.y + 'px';
-      } else {
-        // don't set left; let autoAnchorRight() handle first open placement
+        wrap.style.right = 'auto';
       }
     } catch {}
 
@@ -281,16 +234,22 @@
     `;
     document.body.appendChild(wrap);
 
-    // Draggable
+    // Draggable (save position sparingly)
     (function makeDraggable() {
       const header = wrap.querySelector('#tsentinel-header');
-      let sx=0, sy=0, ox=0, oy=0, dragging=false;
+      let sx=0, sy=0, ox=0, oy=0, dragging=false, saveTO=null;
       header.addEventListener('mousedown', e => { dragging = true; sx = e.clientX; sy = e.clientY; ox = wrap.offsetLeft; oy = wrap.offsetTop; e.preventDefault(); });
-      window.addEventListener('mousemove', e => { if (!dragging) return; const dx = e.clientX - sx, dy = e.clientY - sy; wrap.style.left = (ox + dx) + 'px'; wrap.style.top = (oy + dy) + 'px'; wrap.style.right = 'auto'; });
-      window.addEventListener('mouseup', () => { if (dragging) saveJSON(SKEY.pos, { x: wrap.offsetLeft, y: wrap.offsetTop }); dragging = false; });
+      window.addEventListener('mousemove', e => {
+        if (!dragging) return;
+        const dx = e.clientX - sx, dy = e.clientY - sy;
+        wrap.style.left = (ox + dx) + 'px'; wrap.style.top = (oy + dy) + 'px'; wrap.style.right = 'auto';
+        if (saveTO) clearTimeout(saveTO);
+        saveTO = setTimeout(() => { saveJSON(SKEY.pos, { x: wrap.offsetLeft, y: wrap.offsetTop }); }, 200);
+      }, { passive: true });
+      window.addEventListener('mouseup', () => { dragging = false; }, { passive: true });
     })();
 
-    // Wire controls
+    // Controls
     const $enabled  = wrap.querySelector('#tsentinel-enabled');
     const $api      = wrap.querySelector('#tsentinel-apikey');
     const $saveKey  = wrap.querySelector('#tsentinel-savekey');
@@ -304,57 +263,87 @@
     $api.value = API_KEY || '';
     $interval.value = CFG.intervalSec;
 
-    $iconBtn.addEventListener('click', togglePanel);
-
-    $saveKey.addEventListener('click', async () => {
-      API_KEY = $api.value.trim();
-      GM_setValue(SKEY.apiKey, API_KEY);
-      await pingNow(true, $stores);
-    });
-
-    $enabled.addEventListener('change', () => {
-      CFG.enabled = $enabled.checked; saveJSON(SKEY.cfg, CFG);
-      if (CFG.enabled) startPolling(); else stopPolling();
-    });
-
+    $iconBtn.addEventListener('click', togglePanel, { passive: true });
+    $saveKey.addEventListener('click', async () => { API_KEY = $api.value.trim(); GM_setValue(SKEY.apiKey, API_KEY); await pingNow(true, $stores); }, { passive: true });
+    $enabled.addEventListener('change', () => { CFG.enabled = $enabled.checked; saveJSON(SKEY.cfg, CFG); if (CFG.enabled) startPolling(); else stopPolling(); }, { passive: true });
     $interval.addEventListener('change', () => {
-      let v = parseInt($interval.value, 10);
-      if (isNaN(v) || v < 5) v = 5;
-      CFG.intervalSec = v; saveJSON(SKEY.cfg, CFG);
-      restartPolling();
-    });
+      let v = parseInt($interval.value, 10); if (isNaN(v) || v < 5) v = 5;
+      CFG.intervalSec = v; saveJSON(SKEY.cfg, CFG); restartPolling();
+    }, { passive: true });
+    $refresh.addEventListener('click', () => pingNow(true, $stores), { passive: true });
+    $test.addEventListener('click', () => showAlert('TEST — manual check'), { passive: true });
 
-    $refresh.addEventListener('click', () => pingNow(true, $stores));
-    $test.addEventListener('click', () => { showAlert('TEST — manual check'); });
-
-    // cached stores (so toggles appear ASAP next open)
+    // cached stores for immediate toggles
     const cached = loadJSON(SKEY.lastShops, null);
     if (cached && Array.isArray(cached)) renderStores(cached, $stores);
 
     if (CFG.enabled) startPolling();
-
-    // honor last open/closed state if you ever want that behavior back:
     if (LAST_OPEN === 'open') openPanel();
   }
 
-  // ------------------------ Side Tab ------------------------
-  function updateSideTabLabel() {
-    const tab = document.getElementById('tsentinel-tab');
-    const panel = getPanel();
-    const open = panel && panel.style.display !== 'none';
-    if (tab) tab.textContent = open ? 'CLOSE SENTINEL' : 'OPEN SENTINEL';
-  }
+  // ------------------------ Side Tab & Icon ------------------------
+  let builtTab = false, builtIcon = false;
   function buildSideTab() {
-    if (document.getElementById('tsentinel-tab')) return;
+    if (builtTab) return; builtTab = true;
     const tab = document.createElement('div');
     tab.id = 'tsentinel-tab';
     tab.textContent = 'OPEN SENTINEL';
     tab.title = 'Open/close Shoplifting Sentinel';
-    tab.addEventListener('click', () => togglePanel());
+    tab.addEventListener('click', togglePanel, { passive: true });
     document.documentElement.appendChild(tab);
+    updateSideTabLabel();
+  }
+  function buildStatusIcon() {
+    if (builtIcon) return; builtIcon = true;
+    const bar = document.querySelector('ul[class*=status-icons]');
+    if (!bar) { builtIcon = false; return; }
+    const li = document.createElement('li'); li.className = 'tsentinel-entry';
+    const btn = document.createElement('div'); btn.id = 'tsentinel-icon'; btn.textContent = 'S';
+    btn.title = 'Shoplifting Sentinel – toggle panel';
+    btn.addEventListener('click', togglePanel, { passive: true });
+    li.appendChild(btn); bar.prepend(li);
+  }
+  function updateSideTabLabel() {
+    const tab = document.getElementById('tsentinel-tab');
+    const panel = document.getElementById('tsentinel-wrap');
+    if (!tab || !panel) return;
+    const open = panel.style.display !== 'none';
+    tab.textContent = open ? 'CLOSE SENTINEL' : 'OPEN SENTINEL';
+    GM_setValue(SKEY.lastOpen, open ? 'open' : 'closed');
+    LAST_OPEN = open ? 'open' : 'closed';
+  }
+  function openPanel() {
+    const panel = document.getElementById('tsentinel-wrap') || (buildPanel(), document.getElementById('tsentinel-wrap'));
+    if (!panel) return;
+    panel.style.display = '';
+    updateSideTabLabel();
+  }
+  function closePanel() {
+    const panel = document.getElementById('tsentinel-wrap');
+    if (panel) panel.style.display = 'none';
+    updateSideTabLabel();
+  }
+  function togglePanel() {
+    const panel = document.getElementById('tsentinel-wrap') || (buildPanel(), document.getElementById('tsentinel-wrap'));
+    if (!panel) return;
+    panel.style.display = (panel.style.display === 'none') ? '' : 'none';
+    updateSideTabLabel();
   }
 
   // ------------------------ Rendering ------------------------
+  let lastRenderedKey = ''; // hash of last shop snapshot to avoid re-render churn
+  function hashShops(entries) {
+    // compact hash: store|cam|guard;...
+    return entries.map(({key,status}) => {
+      let cam = 0, grd = 0;
+      status.forEach(d => {
+        const t = (d.title || '').toLowerCase();
+        if (t.includes('camera')) cam = d.disabled ? 1 : 2; // 1=down,2=up
+        if (t.includes('guard'))  grd = d.disabled ? 1 : 2;
+      });
+      return `${key}|${cam}|${grd}`;
+    }).join(';');
+  }
   function renderStores(list, $storesEl) {
     const $stores = $storesEl || document.getElementById('tsentinel-stores');
     if (!$stores) return;
@@ -407,16 +396,16 @@
           ensureStoreEntry(k);
           CFG.storeConfig[k][f] = chk.checked;
           saveJSON(SKEY.cfg, CFG);
-        });
+        }, { passive: true });
       });
     });
     saveJSON(SKEY.cfg, CFG);
   }
 
   // ------------------------ Polling & API ------------------------
-  let timer = null, busy = false;
+  let timer = null, busy = false, lastSnapshot = null;
 
-  function startPolling() { stopPolling(); timer = setInterval(pingNow, CFG.intervalSec * 1000); pingNow(); }
+  function startPolling() { stopPolling(); timer = setInterval(pingNow, Math.max(5, CFG.intervalSec) * 1000); pingNow(); }
   function stopPolling() { if (timer) { clearInterval(timer); timer = null; } }
   function restartPolling() { if (CFG.enabled) startPolling(); }
 
@@ -427,7 +416,7 @@
     const json = await res.json();
     if (json?.error) {
       const msg = json.error.error || 'API error';
-      if (msg.toLowerCase().includes('key')) throw new Error('Incorrect API key');
+      if (String(msg).toLowerCase().includes('key')) throw new Error('Incorrect API key');
       throw new Error(msg);
     }
     return json?.shoplifting || {};
@@ -435,45 +424,49 @@
 
   async function pingNow(forceUI = false, $storesEl = null) {
     if (!CFG.enabled && !forceUI) return;
-    if (busy) return;
-    busy = true;
+    if (busy) return; busy = true;
     try {
       const raw = await fetchShoplifting();
       const entries = Object.entries(raw).map(([key, status]) => ({ key, status }));
 
-      saveJSON(SKEY.lastShops, entries);
-      renderStores(entries, $storesEl);
+      // Only re-render if something changed
+      const h = hashShops(entries);
+      if (h !== lastRenderedKey) {
+        lastRenderedKey = h;
+        lastSnapshot = entries;
+        saveJSON(SKEY.lastShops, entries);
+        renderStores(entries, $storesEl);
+      }
 
+      // Decide alerts
       const now = nowSec();
       const snoozed = CFG.snoozeUntil > now;
 
-      entries.forEach(({ key, status }) => {
+      for (const { key, status } of entries) {
         ensureStoreEntry(key);
         const cfg = CFG.storeConfig[key];
 
         let camDown = null, grdDown = null;
-        status.forEach(d => {
+        for (const d of status) {
           const t = (d.title || '').toLowerCase();
           if (t.includes('camera')) camDown = !!d.disabled;
           if (t.includes('guard'))  grdDown = !!d.disabled;
-        });
-        if (camDown === null && grdDown === null) return;
+        }
+        if (camDown === null && grdDown === null) continue;
 
         let shouldAlert = false;
-        if (cfg.both) {
-          shouldAlert = (camDown === true && grdDown === true);
-        } else {
+        if (cfg.both) shouldAlert = (camDown === true && grdDown === true);
+        else {
           if (cfg.camera && camDown === true) shouldAlert = true;
           if (cfg.guards && grdDown === true) shouldAlert = true;
         }
 
         if (shouldAlert) {
-          if (snoozed) return;
+          if (snoozed) continue;
 
           const last = CFG.lastFired[key] || 0;
           if (now - last >= (CFG.perStoreCooldownSec || 30)) {
-            CFG.lastFired[key] = now;
-            saveJSON(SKEY.cfg, CFG);
+            CFG.lastFired[key] = now; saveJSON(SKEY.cfg, CFG);
 
             const parts = [];
             if (cfg.both) parts.push('Both securities');
@@ -483,11 +476,10 @@
             }
             const which = parts.join(' & ') || 'Security';
             const reason = `${nicify(key)} — ${which} down`;
-
             showAlert(reason);
           }
         }
-      });
+      }
     } catch (e) {
       if (String(e.message || e).toLowerCase().includes('api key')) {
         const $api = document.getElementById('tsentinel-apikey');
@@ -496,39 +488,39 @@
     } finally { busy = false; }
   }
 
-  // ------------------------ Bootstrap (robust for SPA) ------------------------
+  // ------------------------ Bootstrap (lightweight) ------------------------
   function ready(fn) {
     if (document.readyState === 'complete' || document.readyState === 'interactive') return fn();
     document.addEventListener('DOMContentLoaded', fn, { once: true });
   }
   ready(() => {
-    const tryMount = () => {
-      if (!document.body) return void setTimeout(tryMount, 200);
-      buildPanel();
-      buildSideTab();         // ensure the side tab is always present
-      updateSideTabLabel();   // reflect initial state
-    };
-    tryMount();
+    // Build once
+    buildPanel();
+    buildSideTab();
 
-    // Status bar "S" icon (backup)
-    const injectStatusIcon = () => {
-      const bar = document.querySelector('ul[class*=status-icons]');
-      if (!bar) return setTimeout(injectStatusIcon, 1000);
-      if (bar.querySelector('.tsentinel-entry')) return;
-      const li = document.createElement('li'); li.className = 'tsentinel-entry';
-      const btn = document.createElement('div'); btn.id = 'tsentinel-icon'; btn.textContent = 'S';
-      btn.title = 'Shoplifting Sentinel – toggle panel';
-      btn.addEventListener('click', togglePanel);
-      li.appendChild(btn); bar.prepend(li);
-    };
-    injectStatusIcon();
+    // Status bar icon: try once, and retry a couple of times with small backoff—not every mutation
+    let iconTries = 0;
+    (function tryIcon() {
+      if (builtIcon) return;
+      buildStatusIcon();
+      if (!builtIcon && iconTries++ < 3) setTimeout(tryIcon, 800);
+    })();
 
-    // Keep UI alive if Torn does SPA swaps
-    const mo = new MutationObserver(() => {
-      if (!getPanel()) buildPanel();
-      if (!document.getElementById('tsentinel-tab')) { buildSideTab(); }
-      updateSideTabLabel();
-    });
-    mo.observe(document.documentElement, { childList: true, subtree: true });
+    // Debounced, minimal MutationObserver (no subtree scan)
+    let mo, debTO = null;
+    const onMut = () => {
+      if (debTO) return;
+      debTO = setTimeout(() => {
+        debTO = null;
+        if (!builtPanel && document.body) buildPanel();
+        if (!builtTab) buildSideTab();
+        if (!builtIcon) buildStatusIcon();
+      }, 500);
+    };
+    mo = new MutationObserver(onMut);
+    if (document.body) mo.observe(document.body, { childList: true }); // no subtree
+
+    // Start polling if enabled
+    if (CFG.enabled) startPolling();
   });
 })();
