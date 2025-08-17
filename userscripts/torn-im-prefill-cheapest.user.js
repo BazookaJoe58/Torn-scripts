@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Item Market — Prefill (Right 25% Fill Max Overlay)
 // @namespace    https://torn.city/
-// @version      2.4.0
-// @description  Adds a rightmost 25% overlay on Torn's native Buy/Confirm; click once to fill the max you can afford, then the overlay drops behind so the native Buy is clickable. No confirm bypass. No scrolling.
+// @version      2.4.1
+// @description  Adds a rightmost 25% overlay on Torn's native Buy/Confirm; click once to fill the max you can afford, then the overlay drops behind so the native Buy is clickable. No confirm bypass. Hard no-scroll.
 // @author       Baz
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
@@ -46,6 +46,39 @@
   const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
   const rowWrap = (row)=>row.closest(SEL.rowWrapper) || row.closest('li') || document.body;
 
+  // Hard scroll lock wrapper
+  async function withNoScroll(fn){
+    const x = window.scrollX, y = window.scrollY;
+    const restore = ()=>window.scrollTo(x,y);
+    const cssId = 'im-nosmooth-style';
+    if (!document.getElementById(cssId)){
+      const s = document.createElement('style');
+      s.id = cssId;
+      s.textContent = `html,body{scroll-behavior:auto !important}`;
+      document.head.appendChild(s);
+    }
+    // re-pin after every frame for a few frames
+    const pins = [0, 16, 32, 64, 96, 128, 160, 200];
+    try {
+      const onScroll = ()=>restore();
+      window.addEventListener('scroll', onScroll, {capture:true});
+      restore();
+      const r = fn(); // run (may return promise)
+      // keep pinning during async UI work
+      for (const t of pins) setTimeout(restore, t);
+      const val = await r;
+      for (const t of pins) setTimeout(restore, t);
+      requestAnimationFrame(restore);
+      requestAnimationFrame(()=>requestAnimationFrame(restore));
+      return val;
+    } finally {
+      // Leave listener a touch longer to squash late scrolls
+      setTimeout(()=>window.removeEventListener('scroll', ()=>{}, {capture:true}), 250);
+      // final snap
+      setTimeout(restore, 250);
+    }
+  }
+
   function getWalletFromHeader(){
     const root=document.querySelector('#topRoot')||document.body;
     for (const n of root.querySelectorAll('span,div,a,li,b,strong')){
@@ -67,7 +100,6 @@
     const proto=Object.getPrototypeOf(input);
     const setter=Object.getOwnPropertyDescriptor(proto,'value')?.set;
     if (setter) setter.call(input,String(value)); else input.value=String(value);
-    // Satisfy React-like handlers
     input.dispatchEvent(new Event('input',{bubbles:true}));
     input.dispatchEvent(new Event('change',{bubbles:true}));
     input.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true, key:'0'}));
@@ -98,7 +130,7 @@
 
   async function ensureControlsOpen(row){
     const show=row.querySelector(SEL.showBtn);
-    if (show) show.click();
+    if (show) show.click(); // Torn may auto-scroll here — we wrap caller in withNoScroll()
     for (let i=0;i<20;i++){ await sleep(20); if (findAmountInputForRow(row)) break; } // ~400ms
   }
 
@@ -116,10 +148,8 @@
     const container = native;
     if (getComputedStyle(container).position === 'static') container.style.position='relative';
 
-    // Avoid duplicates
     if (container.querySelector(':scope > .im-fill-overlay')) return;
 
-    // Use <div> to avoid focus/scroll side-effects of nested buttons
     const overlay=document.createElement('div');
     overlay.className='im-fill-overlay';
     overlay.setAttribute('role','button');
@@ -127,31 +157,34 @@
     overlay.setAttribute('tabindex','-1');
     overlay.textContent='Fill Max';
 
-    // Prevent default interactions and bubbling (no scroll/jump)
+    // prevent default interactions/bubbling to avoid any native focus/scroll
     overlay.addEventListener('mousedown', (e)=>{ e.preventDefault(); e.stopPropagation(); }, {capture:true});
-    overlay.addEventListener('click', async (e)=>{
+
+    overlay.addEventListener('click', (e)=>{
       e.preventDefault();
       e.stopPropagation();
 
-      const unitPrice=parseMoney(row.querySelector(SEL.price)?.textContent);
-      const qtyText=row.querySelector(SEL.qtyCell)?.textContent;
-      const qty=toInt(qtyText);
-      const wallet=getWalletFromHeader();
-      const afford=computeAfford(wallet,unitPrice,qty);
+      withNoScroll(async ()=>{
+        const unitPrice=parseMoney(row.querySelector(SEL.price)?.textContent);
+        const qtyText=row.querySelector(SEL.qtyCell)?.textContent;
+        const qty=toInt(qtyText);
+        const wallet=getWalletFromHeader();
+        const afford=computeAfford(wallet,unitPrice,qty);
 
-      await ensureControlsOpen(row);
-      const input=findAmountInputForRow(row);
-      if (!input){ alert('Could not find amount input.'); return; }
+        await ensureControlsOpen(row);   // may try to scroll — guarded by withNoScroll
 
-      setInputValue(input, afford>0?afford:'');
-      if (afford<=0) input.placeholder='Insufficient funds';
-      flash(input);
+        const input=findAmountInputForRow(row);
+        if (!input) return;
 
-      // After fill: drop overlay behind so native Buy is immediately clickable
-      overlay.classList.add('im-done');
+        setInputValue(input, afford>0?afford:'');
+        if (afford<=0) input.placeholder='Insufficient funds';
+        flash(input);
+
+        overlay.classList.add('im-done'); // drop behind so native Buy is clickable
+      });
     }, {capture:true});
 
-    // Trap keyboard to avoid page scroll on Space/Enter
+    // Stop Space/Enter from scrolling page
     const killKeys = (e)=>{
       if (e.key === ' ' || e.key === 'Enter'){
         e.preventDefault(); e.stopPropagation();
@@ -174,7 +207,6 @@
     for (const row of getRows()) placeOverlay(row);
   }
 
-  // Observe and keep overlays in sync with React list updates
   const mo=new MutationObserver(()=>{
     if (mo._raf) cancelAnimationFrame(mo._raf);
     mo._raf=requestAnimationFrame(()=>setTimeout(refresh,30));
