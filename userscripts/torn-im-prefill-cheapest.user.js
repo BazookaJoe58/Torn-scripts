@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Item Market — Prefill (Fill Max + Floating Draggable YES)
+// @name         Torn Item Market — Prefill (Fill Max + Always-Visible Draggable YES)
 // @namespace    https://torn.city/
-// @version      2.11.0
-// @description  Row: rightmost 25% "Fill Max" overlay fills max affordable qty. Confirm: show a floating, draggable YES button (only while confirm dialog is visible) that forwards to Torn’s native Yes. Position persists; Alt+Y clicks it.
+// @version      2.11.2
+// @description  Row: rightmost 25% "Fill Max" fills max affordable qty. Floating YES: always visible (faded) and draggable; bright + active when confirm dialog is up. Click forwards to Torn’s native Yes. Alt+Y to click; Ctrl+Alt+Y to show/hide. Position persists.
 // @author       Baz
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
@@ -20,7 +20,7 @@
     .im-fill-overlay{
       position:absolute; display:flex; align-items:center; justify-content:center;
       cursor:pointer; font-size:11px; font-weight:600;
-      z-index:9; background:rgba(22,163,74,.12); color:#16a34a;
+      z-index:2147483500; background:rgba(22,163,74,.12); color:#16a34a;
       border-left:1px solid #16a34a; border-radius:0 8px 8px 0;
       user-select:none;
     }
@@ -32,17 +32,22 @@
     .im-yes-float{
       position: fixed;
       z-index: 2147483647;
-      padding: 10px 14px;
-      border-radius: 10px;
+      padding: 12px 16px;
+      min-width: 68px;
+      border-radius: 12px;
       border: 2px solid var(--tt-color-green, #16a34a);
       background: rgba(22,163,74,.12);
-      color: #16a34a; font-weight: 800; letter-spacing: .3px;
-      box-shadow: 0 8px 30px rgba(0,0,0,.35);
+      color: #16a34a; font-weight: 900; letter-spacing: .3px;
+      text-shadow: 0 1px 0 rgba(255,255,255,.25);
+      box-shadow: 0 10px 34px rgba(0,0,0,.45);
       cursor: grab; user-select: none;
+      transition: opacity .15s ease, transform .05s ease;
+      opacity: .45;
     }
-    .im-yes-float:active{ cursor: grabbing; }
+    .im-yes-float.active{ opacity: 1; }
     .im-yes-float.hidden{ display:none!important; }
     .im-yes-float:hover{ background: rgba(22,163,74,.20); }
+    .im-yes-float:active{ cursor: grabbing; transform: scale(.98); }
   `);
 
   // ---------- Selectors & utils ----------
@@ -59,11 +64,12 @@
   const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
   const parseMoney = (s)=>{ s=String(s||'').replace(/[^\d.]/g,''); return s?Math.floor(Number(s)):NaN; };
   const toInt = (s)=>{ const m=String(s||'').match(/\d[\d,]*/); return m?Number(m[0].replace(/[^\d]/g,'')):NaN; };
+  const isVisible = (el)=> !!el && el.offsetParent !== null && el.getBoundingClientRect().width>0 && el.getBoundingClientRect().height>0;
 
-  // ---------- Fill Max ----------
+  // ---------- Fill Max (working build) ----------
   function getRows(){
     const list=document.querySelector(SEL.list); if (!list) return [];
-    return Array.from(list.querySelectorAll(`${SEL.rowWrapper} > ${SEL.row}`)).filter(r=>r.offsetParent!==null);
+    return Array.from(list.querySelectorAll(`${SEL.rowWrapper} > ${SEL.row}`)).filter(r=>isVisible(r));
   }
   function findNativeBuyButton(row){
     const li=row.closest(SEL.rowWrapper) || row.closest('li') || document.body;
@@ -73,7 +79,7 @@
       if (/show\s*buy/i.test(t)) return false;
       return /buy|confirm|purchase/.test(t);
     });
-    const visible=btns.find(b=>b.getBoundingClientRect().width>0 && b.getBoundingClientRect().height>0);
+    const visible=btns.find(isVisible);
     return visible || btns[0] || null;
   }
   async function ensureControlsOpen(row){
@@ -86,7 +92,7 @@
     const cands=Array.from(li.querySelectorAll(SEL.amountInputs)).filter(inp=>{
       if (!(inp instanceof HTMLInputElement)) return false;
       if (inp.type==='checkbox'||inp.type==='hidden'||inp.disabled) return false;
-      const r=inp.getBoundingClientRect(); return r.width>0 && r.height>0;
+      return isVisible(inp);
     });
     return cands[0] || null;
   }
@@ -160,18 +166,15 @@
 
     container.appendChild(overlay);
   }
-  function refreshRows(){
-    for (const row of getRows()) placeRowOverlay(row);
-  }
+  function refreshRows(){ for (const row of getRows()) placeRowOverlay(row); }
 
-  // ---------- Confirm dialog helpers ----------
+  // ---------- Confirm dialog detection & floating YES ----------
   function findDialog(){
+    // Any of these containers; return the last visible (matches your working build)
     const list = document.querySelectorAll(
-      '[role="dialog"], [class*="modal"], [class*="Dialog"], [class*="dialog"], .confirmWrapper, .ui-dialog, .popup'
+      '[role="dialog"], [class*="modal"], [class*="Dialog"], [class*="dialog"], .confirmWrapper, .ui-dialog, .popup, [class*="confirmWrapper"]'
     );
-    const vis = Array.from(list).filter(el=>{
-      const r=el.getBoundingClientRect(); return r.width>0 && r.height>0;
-    });
+    const vis = Array.from(list).filter(isVisible);
     return vis.pop() || null;
   }
   function findNativeYes(scope){
@@ -183,8 +186,8 @@
     return yes || null;
   }
 
-  // ---------- Floating YES ----------
   const POS_KEY = 'imYesFloatPos';
+  const VIS_KEY = 'imYesFloatVisible';
   function loadPos(){
     try{ const p = JSON.parse(localStorage.getItem(POS_KEY)||''); if (p && Number.isFinite(p.left) && Number.isFinite(p.top)) return p; }catch{}
     return { left: window.innerWidth - 140, top: Math.round(window.innerHeight*0.18) };
@@ -195,11 +198,11 @@
     let btn = document.querySelector('.im-yes-float');
     if (!btn){
       btn = document.createElement('button');
-      btn.className = 'im-yes-float hidden';
+      btn.className = 'im-yes-float';
       btn.textContent = 'YES';
       document.body.appendChild(btn);
 
-      // Drag support
+      // drag
       let dragging=false, sx=0, sy=0, startLeft=0, startTop=0;
       const onDown = (e)=>{
         e.preventDefault(); e.stopPropagation();
@@ -227,7 +230,7 @@
       };
       btn.addEventListener('mousedown', onDown, true);
 
-      // Click forwards to native Yes
+      // click -> native Yes
       btn.addEventListener('click', (e)=>{
         e.preventDefault(); e.stopPropagation();
         const dlg = findDialog();
@@ -235,24 +238,35 @@
         if (yes) yes.click();
       }, {capture:true});
 
+      // restore pos & visibility
       const pos = loadPos();
       btn.style.left = pos.left + 'px';
       btn.style.top  = pos.top + 'px';
+      const visible = localStorage.getItem(VIS_KEY);
+      if (visible === 'hidden') btn.classList.add('hidden');
     }
     return btn;
   }
 
-  function updateFloatVisibility(){
-    const dlg = findDialog();
+  function updateFloatState(){
     const btn = ensureFloatYes();
-    if (dlg){ btn.classList.remove('hidden'); }
-    else { btn.classList.add('hidden'); }
+    const dlg = findDialog();
+    if (dlg){ btn.classList.add('active'); }
+    else { btn.classList.remove('active'); }
   }
 
+  // Hotkeys
   window.addEventListener('keydown', (e)=>{
-    if (e.altKey && e.code === 'KeyY'){
+    // Alt+Y: click
+    if (e.altKey && !e.ctrlKey && e.code === 'KeyY'){
       const btn = document.querySelector('.im-yes-float');
       if (btn && !btn.classList.contains('hidden')) btn.click();
+    }
+    // Ctrl+Alt+Y: toggle show/hide
+    if (e.altKey && e.ctrlKey && e.code === 'KeyY'){
+      const btn = ensureFloatYes();
+      btn.classList.toggle('hidden');
+      localStorage.setItem(VIS_KEY, btn.classList.contains('hidden') ? 'hidden' : 'visible');
     }
   }, true);
 
@@ -260,7 +274,7 @@
   const rowsMO = new MutationObserver(()=>refreshRows());
   rowsMO.observe(document.documentElement, {childList:true, subtree:true});
 
-  const dialogMO = new MutationObserver(()=>updateFloatVisibility());
+  const dialogMO = new MutationObserver(()=>updateFloatState());
   dialogMO.observe(document.documentElement, {childList:true, subtree:true});
 
   document.addEventListener('click', (ev)=>{
@@ -270,9 +284,8 @@
     let tries = 0;
     const iv = setInterval(()=>{
       tries++;
-      updateFloatVisibility();
-      const btn = document.querySelector('.im-yes-float');
-      if ((btn && !btn.classList.contains('hidden')) || tries>60) clearInterval(iv);
+      updateFloatState();
+      if (tries>60) clearInterval(iv);
     }, 50);
   }, true);
 
@@ -280,5 +293,5 @@
   setTimeout(refreshRows,200);
   setTimeout(refreshRows,800);
   setInterval(refreshRows,2000);
-  setInterval(updateFloatVisibility, 400);
+  setInterval(updateFloatState, 400);
 })();
