@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Item Market — Prefill (Dialog MADE Yes top-right)
+// @name         Torn Item Market — Prefill (Row Fill Max + Dialog Yes Clone)
 // @namespace    https://torn.city/
-// @version      2.9.3
-// @description  Adds a NEW “Yes” button in Torn’s confirm dialog (top-right, just left of the X). Clicking it forwards to the native Yes. Also keeps the row Fill Max overlay on Buy (rightmost 25%). No confirm bypass; only UI sugar. (v2.9.3 = robustness only; same visuals/behavior as 2.9.2)
+// @version      2.9.4
+// @description  Row: rightmost 25% "Fill Max" overlay that fills max affordable into the qty input. Dialog: adds a NEW "Yes" (top-right, left of the close X) that forwards to the native Yes. No confirm bypass; only UI helpers.
 // @author       Baz
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
@@ -14,12 +14,13 @@
 (function () {
   'use strict';
 
+  // ---------- Styles ----------
   GM_addStyle(`
-    /* Row overlay (right 25% of native Buy) */
+    /* Row overlay: rightmost 25% of the native Buy */
     .im-fill-overlay{
       position:absolute; display:flex; align-items:center; justify-content:center;
       cursor:pointer; font-size:11px; font-weight:600;
-      z-index:9; background:rgba(22,163,74,.12); color:#16a34a;
+      z-index:9999; background:rgba(22,163,74,.12); color:#16a34a;
       border-left:1px solid #16a34a; border-radius:0 8px 8px 0;
       pointer-events:auto; user-select:none; -webkit-user-select:none;
     }
@@ -27,13 +28,13 @@
     .im-fill-overlay.im-done{ z-index:-1; pointer-events:none; background:transparent; border-color:transparent }
     .im-flash{ box-shadow:0 0 0 3px rgba(0,160,255,.55)!important; transition:box-shadow .25s ease }
 
-    /* NEW top-right Yes button inside dialog */
+    /* NEW top-right Yes button inside confirm dialog */
     .im-yes-made {
       position:absolute !important;
       z-index:2147483646 !important;
       padding:6px 10px !important;
       border-radius:6px !important;
-      border:1px solid var(--tt-color-green, #16a34a) !important;
+      border:1px solid #16a34a !important;
       background:rgba(22,163,74,.12) !important;
       color:#16a34a !important;
       font-weight:600 !important;
@@ -45,7 +46,7 @@
     .im-yes-made:hover{ background:rgba(22,163,74,.20) !important; }
   `);
 
-  // --- selectors & utils ---
+  // ---------- Selectors & utils ----------
   const SEL = {
     list: 'ul[class*="sellerList"]',
     rowWrapper: 'li[class*="rowWrapper"]',
@@ -56,23 +57,25 @@
     amountInputs: 'input:not([type="checkbox"]):not([type="hidden"])',
     buyButtons: 'button, a'
   };
-  const sleep = ms => new Promise(r=>setTimeout(r,ms));
-  const parseMoney = s => { s=String(s||'').replace(/[^\d.]/g,''); return s?Math.floor(Number(s)):NaN; };
-  const toInt = s => { const m=String(s||'').match(/\d[\d,]*/); return m?Number(m[0].replace(/[^\d]/g,'')):NaN; };
+  const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
+  const parseMoney = (s)=>{ s=String(s||'').replace(/[^\d.]/g,''); return s?Math.floor(Number(s)):NaN; };
+  const toInt = (s)=>{ const m=String(s||'').match(/\d[\d,]*/); return m?Number(m[0].replace(/[^\d]/g,'')):NaN; };
+  const inViewport = (el)=>{ const r=el.getBoundingClientRect(); return r.width>0 && r.height>0; };
+  const flash = (el)=>{ el && el.classList.add('im-flash'); setTimeout(()=>el && el.classList.remove('im-flash'), 280); };
 
   function getRows(){
     const list=document.querySelector(SEL.list); if (!list) return [];
-    return Array.from(list.querySelectorAll(`${SEL.rowWrapper} > ${SEL.row}`)).filter(r=>r.offsetParent!==null);
+    return Array.from(list.querySelectorAll(`${SEL.rowWrapper} > ${SEL.row}`)).filter(inViewport);
   }
   function findNativeBuyButton(row){
     const li=row.closest(SEL.rowWrapper) || row.closest('li') || document.body;
     const btns=Array.from(li.querySelectorAll(SEL.buyButtons)).filter(b=>{
       const t=(b.textContent||'').trim().toLowerCase();
       if (!t) return false;
-      if (/show\s*buy/i.test(t)) return false;
+      if (/show\s*buy/i.test(t)) return false; // skip expand toggle
       return /buy|confirm|purchase/.test(t);
     });
-    const visible=btns.find(b=>b.getBoundingClientRect().width>0 && b.getBoundingClientRect().height>0);
+    const visible=btns.find(inViewport);
     return visible || btns[0] || null;
   }
   async function ensureControlsOpen(row){
@@ -90,17 +93,29 @@
     return cands[0] || null;
   }
   function getWalletFromHeader(){
-    const root=document.querySelector('#topRoot')||document.body;
-    for (const n of root.querySelectorAll('span,div,a,li,b,strong')){
-      const t=n.textContent||'';
-      if (/\$\s?[\d,. ]+/.test(t)){ const v=parseMoney(t); if (Number.isFinite(v) && v>=0) return v; }
+    // Prefer header roots; return the first reasonable $… value
+    const scopes = [
+      document.querySelector('#topRoot'),
+      document.querySelector('#headerRoot'),
+      document.querySelector('header'),
+      document.body
+    ].filter(Boolean);
+    for (const root of scopes){
+      for (const n of root.querySelectorAll('span,div,a,li,b,strong')){
+        const t=(n.textContent||'').trim();
+        if (!t) continue;
+        if (!/\$\s?[\d,. ]+/.test(t)) continue;
+        if (t.length > 20) continue; // avoid huge listing strings
+        const v=parseMoney(t);
+        if (Number.isFinite(v) && v>=0) return v;
+      }
     }
     return NaN;
   }
   function computeAfford(wallet, unitPrice, qty){
+    if (!Number.isFinite(qty) || qty<=0) qty=Infinity; // be lenient
     if (!Number.isFinite(wallet)||wallet<=0) return 0;
     if (!Number.isFinite(unitPrice)||unitPrice<=0) return 0;
-    if (!Number.isFinite(qty)||qty<=0) qty=Infinity;
     return Math.max(0, Math.min(Math.floor(wallet/unitPrice), qty));
   }
   function setInputValue(input, value){
@@ -111,22 +126,22 @@
     input.dispatchEvent(new Event('change',{bubbles:true}));
     input.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true, key:'0'}));
   }
-  function flash(el){ el && el.classList.add('im-flash'); setTimeout(()=>el && el.classList.remove('im-flash'),280); }
 
-  // --- row overlay ---
+  // ---------- Row overlay (Fill Max) ----------
   function positionOverlay(overlay, nativeBtn){
     const parent=overlay.parentElement; if (!parent) return;
     const pr=parent.getBoundingClientRect(), br=nativeBtn.getBoundingClientRect();
     const ow=Math.max(24, Math.round(br.width*0.25));
-    overlay.style.top=`${br.top-pr.top}px`;
-    overlay.style.left=`${br.left-pr.left + (br.width-ow)}px`;
-    overlay.style.width=`${ow}px`;
+    overlay.style.top  = `${br.top-pr.top}px`;
+    overlay.style.left = `${br.left-pr.left + (br.width-ow)}px`;
+    overlay.style.width= `${ow}px`;
     overlay.style.height=`${br.height}px`;
     overlay.style.borderRadius='0 8px 8px 0';
   }
   function placeRowOverlay(row){
     const native=findNativeBuyButton(row);
     if (!native) return;
+
     const container=native.parentElement || row;
     if (getComputedStyle(container).position==='static') container.style.position='relative';
     if (container.querySelector(':scope > .im-fill-overlay')) return;
@@ -143,19 +158,25 @@
     overlay.addEventListener('mousedown',(e)=>{ e.preventDefault(); e.stopPropagation(); }, {capture:true});
     overlay.addEventListener('click', async (e)=>{
       e.preventDefault(); e.stopPropagation();
+
       const unit=parseMoney(row.querySelector(SEL.price)?.textContent);
-      const qty=toInt(row.querySelector(SEL.qtyCell)?.textContent);
+      const qty =toInt(row.querySelector(SEL.qtyCell)?.textContent);
       const wallet=getWalletFromHeader();
       const afford=computeAfford(wallet, unit, qty);
 
       await ensureControlsOpen(row);
       const input=findAmountInputForRow(row);
-      if (input){
-        setInputValue(input, afford>0?afford:'');
-        if (afford<=0) input.placeholder='Insufficient funds';
+      if (!input) return;
+
+      if (afford>0){
+        setInputValue(input, afford);
+        flash(input);
+      } else {
+        input.placeholder='Insufficient funds';
         flash(input);
       }
-      overlay.classList.add('im-done');
+
+      overlay.classList.add('im-done'); // drop behind; native Buy remains clickable
     }, {capture:true});
 
     container.appendChild(overlay);
@@ -164,7 +185,7 @@
     for (const row of getRows()) placeRowOverlay(row);
   }
 
-  // --- confirm dialog helpers (robust) ---
+  // ---------- Confirm dialog (clone Yes, top-right) ----------
   function findDialog(){
     const qs = [
       '[role="dialog"][aria-modal="true"]',
@@ -199,9 +220,9 @@
       const t=(b.textContent||'').trim().toLowerCase();
       if (/(^|\b)(yes|confirm|buy|purchase|ok|proceed)(\b|!|\.|,)/.test(t)) return b;
     }
-    return dialog.querySelector('button[class*="confirm"], a[class*="confirm"]');
+    // Common class names Torn uses for the confirm/yes action
+    return dialog.querySelector('button[class*="confirm"], a[class*="confirm"], button[class*="primary"]');
   }
-
   function makeYesTopRight(dialog){
     if (!dialog || dialog.querySelector('.im-yes-made')) return;
 
@@ -215,7 +236,6 @@
     made.type='button';
     made.className='im-yes-made';
     made.textContent=(yes.textContent||'Yes').trim();
-    made.style.zIndex='2147483646';
 
     const posIt = () => {
       const pr = dialog.getBoundingClientRect();
@@ -229,7 +249,8 @@
       made.style.width  = `${Math.max(70, baseW)}px`;
       made.style.height = `${Math.max(28, baseH)}px`;
       made.style.top    = `8px`;
-      made.style.right  = `${Math.max(8, (pr.right - xr.left) + gap)}px`; // same visual as 2.9.2
+      // same baseline as your confirmed-working build (no extra nudge)
+      made.style.right  = `${Math.max(8, (pr.right - xr.left) + gap)}px`;
     };
 
     made.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); findNativeYes(dialog)?.click(); }, {capture:true});
@@ -241,7 +262,7 @@
     window.addEventListener('scroll', posIt, {passive:true});
   }
 
-  // Mount when dialog appears (short reliable poll like 2.9.2)
+  // Build Yes clone when dialog appears (like your original, with retries)
   const dialogMO = new MutationObserver(()=>{
     const dlg = findDialog();
     if (dlg){
@@ -255,7 +276,7 @@
   });
   dialogMO.observe(document.documentElement, {childList:true, subtree:true});
 
-  // Also: hook Buy/Confirm clicks and try for up to ~5s (handles other scripts crashing mid-render)
+  // Also: hook Buy/Confirm clicks; try up to ~5s to catch slower renders
   document.addEventListener('click', (ev)=>{
     const t = ev.target;
     if (!t) return;
@@ -274,16 +295,15 @@
     }, 50);
   }, true);
 
-  // safety sweep (dialog might already be open)
+  // Safety sweep
   setInterval(()=>{ const dlg=findDialog(); if (dlg) makeYesTopRight(dlg); }, 300);
 
-  // bootstrap rows
+  // ---------- Bootstrap rows ----------
   const docMO=new MutationObserver(()=>{
     if (docMO._raf) cancelAnimationFrame(docMO._raf);
     docMO._raf=requestAnimationFrame(()=>setTimeout(refreshRows,30));
   });
   docMO.observe(document.documentElement,{childList:true,subtree:true});
-
   setTimeout(refreshRows,200);
   setTimeout(refreshRows,800);
   setInterval(refreshRows,2000);
