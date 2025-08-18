@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Item Market — Prefill (Fill Max + Inline Yes Clone)
+// @name         Torn Item Market — Prefill (Fill Max + Floating Draggable YES)
 // @namespace    https://torn.city/
-// @version      2.10.0
-// @description  Row: rightmost 25% "Fill Max" overlay fills max affordable into qty. Confirm: clone the native "Yes" INSIDE the confirmButtons row (next to Torn’s Yes), forwarding click to the native handler. No confirm bypass—just UI helpers.
+// @version      2.11.0
+// @description  Row: rightmost 25% "Fill Max" overlay fills max affordable qty. Confirm: show a floating, draggable YES button (only while confirm dialog is visible) that forwards to Torn’s native Yes. Position persists; Alt+Y clicks it.
 // @author       Baz
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
@@ -28,19 +28,21 @@
     .im-fill-overlay.im-done{ z-index:-1; pointer-events:none; background:transparent; border-color:transparent }
     .im-flash{ box-shadow:0 0 0 3px rgba(0,160,255,.55)!important; transition:box-shadow .25s ease }
 
-    /* Inline YES clone inside confirmButtons */
-    .im-yes-clone-inline{
-      margin-left: 8px !important;
-      padding: 6px 10px !important;
-      border-radius: 6px !important;
-      border: 1px solid var(--tt-color-green, #16a34a) !important;
-      background: rgba(22,163,74,.12) !important;
-      color: #16a34a !important;
-      font-weight: 600 !important;
-      cursor: pointer !important;
-      z-index: 2147483646 !important;
+    /* Floating draggable YES */
+    .im-yes-float{
+      position: fixed;
+      z-index: 2147483647;
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 2px solid var(--tt-color-green, #16a34a);
+      background: rgba(22,163,74,.12);
+      color: #16a34a; font-weight: 800; letter-spacing: .3px;
+      box-shadow: 0 8px 30px rgba(0,0,0,.35);
+      cursor: grab; user-select: none;
     }
-    .im-yes-clone-inline:hover{ background: rgba(22,163,74,.20) !important; }
+    .im-yes-float:active{ cursor: grabbing; }
+    .im-yes-float.hidden{ display:none!important; }
+    .im-yes-float:hover{ background: rgba(22,163,74,.20); }
   `);
 
   // ---------- Selectors & utils ----------
@@ -58,7 +60,7 @@
   const parseMoney = (s)=>{ s=String(s||'').replace(/[^\d.]/g,''); return s?Math.floor(Number(s)):NaN; };
   const toInt = (s)=>{ const m=String(s||'').match(/\d[\d,]*/); return m?Number(m[0].replace(/[^\d]/g,'')):NaN; };
 
-  // ---------- Fill Max (unchanged) ----------
+  // ---------- Fill Max ----------
   function getRows(){
     const list=document.querySelector(SEL.list); if (!list) return [];
     return Array.from(list.querySelectorAll(`${SEL.rowWrapper} > ${SEL.row}`)).filter(r=>r.offsetParent!==null);
@@ -162,80 +164,121 @@
     for (const row of getRows()) placeRowOverlay(row);
   }
 
-  // ---------- Confirm dialog: inline clone of native "Yes" ----------
+  // ---------- Confirm dialog helpers ----------
   function findDialog(){
     const list = document.querySelectorAll(
-      // same family as your screenshot: confirmWrapper / confirmButtons live under here
       '[role="dialog"], [class*="modal"], [class*="Dialog"], [class*="dialog"], .confirmWrapper, .ui-dialog, .popup'
     );
     const vis = Array.from(list).filter(el=>{
       const r=el.getBoundingClientRect(); return r.width>0 && r.height>0;
     });
-    return vis.pop() || null; // last visible (matches your working build)
+    return vis.pop() || null;
+  }
+  function findNativeYes(scope){
+    const dlg = scope || document;
+    const labels = /(^(yes|confirm|buy|purchase|ok|proceed)\b)|(\b(confirm purchase|confirm order|buy now)\b)/i;
+    const btns = Array.from(dlg.querySelectorAll('button, a, [role="button"]'));
+    let yes = btns.find(b=>labels.test((b.textContent||'').trim()));
+    if (!yes) yes = dlg.querySelector('button[class*="confirmButton"], a[class*="confirmButton"], button[class*="primary"]');
+    return yes || null;
   }
 
-  function findNativeYes(dialog){
-    const btns = dialog.querySelectorAll('button, a, [role="button"]');
-    for (const b of btns){
-      const t=(b.textContent||'').trim().toLowerCase();
-      if (/(^|\b)(yes|confirm|buy|purchase|ok|proceed)(\b|!|\.|,)/.test(t)) return b;
+  // ---------- Floating YES ----------
+  const POS_KEY = 'imYesFloatPos';
+  function loadPos(){
+    try{ const p = JSON.parse(localStorage.getItem(POS_KEY)||''); if (p && Number.isFinite(p.left) && Number.isFinite(p.top)) return p; }catch{}
+    return { left: window.innerWidth - 140, top: Math.round(window.innerHeight*0.18) };
+  }
+  function clamp(val,min,max){ return Math.max(min, Math.min(max, val)); }
+
+  function ensureFloatYes(){
+    let btn = document.querySelector('.im-yes-float');
+    if (!btn){
+      btn = document.createElement('button');
+      btn.className = 'im-yes-float hidden';
+      btn.textContent = 'YES';
+      document.body.appendChild(btn);
+
+      // Drag support
+      let dragging=false, sx=0, sy=0, startLeft=0, startTop=0;
+      const onDown = (e)=>{
+        e.preventDefault(); e.stopPropagation();
+        dragging=true; btn.style.cursor='grabbing';
+        const pos = btn.getBoundingClientRect();
+        sx = e.clientX; sy = e.clientY; startLeft = pos.left; startTop = pos.top;
+        window.addEventListener('mousemove', onMove, true);
+        window.addEventListener('mouseup', onUp, true);
+      };
+      const onMove = (e)=>{
+        if (!dragging) return;
+        const nl = clamp(startLeft + (e.clientX - sx), 4, window.innerWidth - btn.offsetWidth - 4);
+        const nt = clamp(startTop + (e.clientY - sy), 4, window.innerHeight - btn.offsetHeight - 4);
+        btn.style.left = nl + 'px';
+        btn.style.top  = nt + 'px';
+        btn.style.right = ''; btn.style.bottom = '';
+      };
+      const onUp = ()=>{
+        if (!dragging) return;
+        dragging=false; btn.style.cursor='grab';
+        window.removeEventListener('mousemove', onMove, true);
+        window.removeEventListener('mouseup', onUp, true);
+        const rect = btn.getBoundingClientRect();
+        localStorage.setItem(POS_KEY, JSON.stringify({left: rect.left, top: rect.top}));
+      };
+      btn.addEventListener('mousedown', onDown, true);
+
+      // Click forwards to native Yes
+      btn.addEventListener('click', (e)=>{
+        e.preventDefault(); e.stopPropagation();
+        const dlg = findDialog();
+        const yes = findNativeYes(dlg || document);
+        if (yes) yes.click();
+      }, {capture:true});
+
+      const pos = loadPos();
+      btn.style.left = pos.left + 'px';
+      btn.style.top  = pos.top + 'px';
     }
-    // class hint from your inspector (e.g., confirmButton__…)
-    return dialog.querySelector('button[class*="confirmButton"]');
+    return btn;
   }
 
-  function findButtonsContainer(dialog){
-    // prefer the explicit confirm buttons container if present
-    return dialog.querySelector('[class*="confirmButtons"]') || dialog;
-  }
-
-  function makeYesInline(dialog){
-    if (!dialog || dialog.querySelector('.im-yes-clone-inline')) return;
-
-    const nativeYes = findNativeYes(dialog);
-    if (!nativeYes) return; // wait until native mounts
-
-    // clone a clean button (don’t copy listeners)
-    const cloned = document.createElement('button');
-    cloned.type = 'button';
-    cloned.className = 'im-yes-clone-inline';
-    cloned.textContent = (nativeYes.textContent || 'Yes').trim();
-
-    cloned.addEventListener('click', (e)=>{
-      e.preventDefault(); e.stopPropagation();
-      nativeYes.click(); // forward to Torn’s handler
-    }, {capture:true});
-
-    // append inside the same button row, after the native Yes
-    const container = findButtonsContainer(dialog);
-    if (nativeYes.nextSibling) nativeYes.parentNode.insertBefore(cloned, nativeYes.nextSibling);
-    else container.appendChild(cloned);
-  }
-
-  // Observe for dialog mounts & build inline Yes
-  const dialogMO = new MutationObserver(()=>{
+  function updateFloatVisibility(){
     const dlg = findDialog();
-    if (!dlg) return;
+    const btn = ensureFloatYes();
+    if (dlg){ btn.classList.remove('hidden'); }
+    else { btn.classList.add('hidden'); }
+  }
+
+  window.addEventListener('keydown', (e)=>{
+    if (e.altKey && e.code === 'KeyY'){
+      const btn = document.querySelector('.im-yes-float');
+      if (btn && !btn.classList.contains('hidden')) btn.click();
+    }
+  }, true);
+
+  // ---------- Observers ----------
+  const rowsMO = new MutationObserver(()=>refreshRows());
+  rowsMO.observe(document.documentElement, {childList:true, subtree:true});
+
+  const dialogMO = new MutationObserver(()=>updateFloatVisibility());
+  dialogMO.observe(document.documentElement, {childList:true, subtree:true});
+
+  document.addEventListener('click', (ev)=>{
+    const t = ev.target; if (!t) return;
+    const txt = (t.textContent || '').toLowerCase();
+    if (!/(^|\b)(buy|purchase|confirm)(\b|!|\.|,)/.test(txt)) return;
     let tries = 0;
     const iv = setInterval(()=>{
       tries++;
-      makeYesInline(dlg);
-      if (dlg.querySelector('.im-yes-clone-inline') || tries > 40) clearInterval(iv);
+      updateFloatVisibility();
+      const btn = document.querySelector('.im-yes-float');
+      if ((btn && !btn.classList.contains('hidden')) || tries>60) clearInterval(iv);
     }, 50);
-  });
-  dialogMO.observe(document.documentElement, {childList:true, subtree:true});
-
-  // Safety sweep: if a dialog is already open
-  setInterval(()=>{ const dlg=findDialog(); if (dlg) makeYesInline(dlg); }, 300);
+  }, true);
 
   // ---------- Bootstrap ----------
-  const docMO=new MutationObserver(()=>{
-    if (docMO._raf) cancelAnimationFrame(docMO._raf);
-    docMO._raf=requestAnimationFrame(()=>setTimeout(refreshRows,30));
-  });
-  docMO.observe(document.documentElement,{childList:true,subtree:true});
-
   setTimeout(refreshRows,200);
   setTimeout(refreshRows,800);
   setInterval(refreshRows,2000);
+  setInterval(updateFloatVisibility, 400);
 })();
