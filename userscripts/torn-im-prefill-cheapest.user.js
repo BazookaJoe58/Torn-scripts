@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Item Market — Prefill (Fill Max + Always-Visible Draggable YES)
+// @name         Torn Item Market — Floating Fill Max (Cheapest) + Floating YES
 // @namespace    https://torn.city/
-// @version      2.11.2
-// @description  Row: rightmost 25% "Fill Max" fills max affordable qty. Floating YES: always visible (faded) and draggable; bright + active when confirm dialog is up. Click forwards to Torn’s native Yes. Alt+Y to click; Ctrl+Alt+Y to show/hide. Position persists.
+// @version      2.12.0
+// @description  Floating, draggable "FILL MAX" that pre-fills the cheapest listing with max affordable qty; floating, draggable "YES" that forwards to Torn’s native confirm. Both remember position; Alt+F/Alt+Y to trigger; Ctrl+Alt+F / Ctrl+Alt+Y to show/hide.
 // @author       Baz
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
@@ -16,24 +16,11 @@
 
   // ---------- Styles ----------
   GM_addStyle(`
-    /* Fill Max overlay (unchanged) */
-    .im-fill-overlay{
-      position:absolute; display:flex; align-items:center; justify-content:center;
-      cursor:pointer; font-size:11px; font-weight:600;
-      z-index:2147483500; background:rgba(22,163,74,.12); color:#16a34a;
-      border-left:1px solid #16a34a; border-radius:0 8px 8px 0;
-      user-select:none;
-    }
-    .im-fill-overlay:hover{ background:rgba(22,163,74,.20) }
-    .im-fill-overlay.im-done{ z-index:-1; pointer-events:none; background:transparent; border-color:transparent }
-    .im-flash{ box-shadow:0 0 0 3px rgba(0,160,255,.55)!important; transition:box-shadow .25s ease }
-
-    /* Floating draggable YES */
-    .im-yes-float{
+    .im-chip{
       position: fixed;
       z-index: 2147483647;
       padding: 12px 16px;
-      min-width: 68px;
+      min-width: 86px;
       border-radius: 12px;
       border: 2px solid var(--tt-color-green, #16a34a);
       background: rgba(22,163,74,.12);
@@ -44,10 +31,18 @@
       transition: opacity .15s ease, transform .05s ease;
       opacity: .45;
     }
-    .im-yes-float.active{ opacity: 1; }
-    .im-yes-float.hidden{ display:none!important; }
-    .im-yes-float:hover{ background: rgba(22,163,74,.20); }
-    .im-yes-float:active{ cursor: grabbing; transform: scale(.98); }
+    .im-chip.active{ opacity: 1; }
+    .im-chip.hidden{ display:none!important; }
+    .im-chip:hover{ background: rgba(22,163,74,.20); }
+    .im-chip:active{ cursor: grabbing; transform: scale(.98); }
+
+    /* Different accent for Fill Max so you can tell which is which at a glance */
+    .im-chip-fill{
+      border-color: #0ea5e9; /* cyan */
+      color: #0ea5e9;
+      background: rgba(14,165,233,.12);
+    }
+    .im-chip-fill:hover{ background: rgba(14,165,233,.20); }
   `);
 
   // ---------- Selectors & utils ----------
@@ -66,35 +61,9 @@
   const toInt = (s)=>{ const m=String(s||'').match(/\d[\d,]*/); return m?Number(m[0].replace(/[^\d]/g,'')):NaN; };
   const isVisible = (el)=> !!el && el.offsetParent !== null && el.getBoundingClientRect().width>0 && el.getBoundingClientRect().height>0;
 
-  // ---------- Fill Max (working build) ----------
   function getRows(){
     const list=document.querySelector(SEL.list); if (!list) return [];
-    return Array.from(list.querySelectorAll(`${SEL.rowWrapper} > ${SEL.row}`)).filter(r=>isVisible(r));
-  }
-  function findNativeBuyButton(row){
-    const li=row.closest(SEL.rowWrapper) || row.closest('li') || document.body;
-    const btns=Array.from(li.querySelectorAll(SEL.buyButtons)).filter(b=>{
-      const t=(b.textContent||'').trim().toLowerCase();
-      if (!t) return false;
-      if (/show\s*buy/i.test(t)) return false;
-      return /buy|confirm|purchase/.test(t);
-    });
-    const visible=btns.find(isVisible);
-    return visible || btns[0] || null;
-  }
-  async function ensureControlsOpen(row){
-    const show=row.querySelector(SEL.showBtn);
-    if (show) show.click();
-    for (let i=0;i<20;i++){ await sleep(20); if (findAmountInputForRow(row)) break; }
-  }
-  function findAmountInputForRow(row){
-    const li=row.closest(SEL.rowWrapper) || row.closest('li') || document.body;
-    const cands=Array.from(li.querySelectorAll(SEL.amountInputs)).filter(inp=>{
-      if (!(inp instanceof HTMLInputElement)) return false;
-      if (inp.type==='checkbox'||inp.type==='hidden'||inp.disabled) return false;
-      return isVisible(inp);
-    });
-    return cands[0] || null;
+    return Array.from(list.querySelectorAll(`${SEL.rowWrapper} > ${SEL.row}`)).filter(isVisible);
   }
   function getWalletFromHeader(){
     const root=document.querySelector('#topRoot')||document.body;
@@ -118,64 +87,19 @@
     input.dispatchEvent(new Event('change',{bubbles:true}));
     input.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true, key:'0'}));
   }
-  function flash(el){ if(!el) return; el.classList.add('im-flash'); setTimeout(()=>el.classList.remove('im-flash'),280); }
-
-  function positionOverlay(overlay, nativeBtn){
-    const parent=overlay.parentElement; if (!parent) return;
-    const pr=parent.getBoundingClientRect(), br=nativeBtn.getBoundingClientRect();
-    const ow=Math.max(24, Math.round(br.width*0.25));
-    overlay.style.top=`${br.top-pr.top}px`;
-    overlay.style.left=`${br.left-pr.left + (br.width-ow)}px`;
-    overlay.style.width=`${ow}px`;
-    overlay.style.height=`${br.height}px`;
-    overlay.style.borderRadius='0 8px 8px 0';
+  async function ensureControlsOpen(row){
+    const show=row.querySelector(SEL.showBtn);
+    if (show) show.click();
+    for (let i=0;i<20;i++){ await sleep(20); if (findAmountInputForRow(row)) break; }
   }
-  function placeRowOverlay(row){
-    const native=findNativeBuyButton(row);
-    if (!native) return;
-    const container=native.parentElement || row;
-    if (getComputedStyle(container).position==='static') container.style.position='relative';
-    if (container.querySelector(':scope > .im-fill-overlay')) return;
-
-    const overlay=document.createElement('div');
-    overlay.className='im-fill-overlay';
-    overlay.textContent='Fill Max';
-    positionOverlay(overlay, native);
-
-    const ro=new ResizeObserver(()=>positionOverlay(overlay, native));
-    ro.observe(container); ro.observe(native);
-    window.addEventListener('scroll', ()=>positionOverlay(overlay, native), {passive:true});
-
-    overlay.addEventListener('mousedown',(e)=>{ e.preventDefault(); e.stopPropagation(); }, {capture:true});
-    overlay.addEventListener('click', async (e)=>{
-      e.preventDefault(); e.stopPropagation();
-      const unit=parseMoney(row.querySelector(SEL.price)?.textContent);
-      const qty=toInt(row.querySelector(SEL.qtyCell)?.textContent);
-      const wallet=getWalletFromHeader();
-      const afford=computeAfford(wallet, unit, qty);
-
-      await ensureControlsOpen(row);
-      const input=findAmountInputForRow(row);
-      if (input){
-        setInputValue(input, afford>0?afford:'');
-        if (afford<=0) input.placeholder='Insufficient funds';
-        flash(input);
-      }
-      overlay.classList.add('im-done');
-    }, {capture:true});
-
-    container.appendChild(overlay);
-  }
-  function refreshRows(){ for (const row of getRows()) placeRowOverlay(row); }
-
-  // ---------- Confirm dialog detection & floating YES ----------
-  function findDialog(){
-    // Any of these containers; return the last visible (matches your working build)
-    const list = document.querySelectorAll(
-      '[role="dialog"], [class*="modal"], [class*="Dialog"], [class*="dialog"], .confirmWrapper, .ui-dialog, .popup, [class*="confirmWrapper"]'
-    );
-    const vis = Array.from(list).filter(isVisible);
-    return vis.pop() || null;
+  function findAmountInputForRow(row){
+    const li=row.closest(SEL.rowWrapper) || row.closest('li') || document.body;
+    const cands=Array.from(li.querySelectorAll(SEL.amountInputs)).filter(inp=>{
+      if (!(inp instanceof HTMLInputElement)) return false;
+      if (inp.type==='checkbox'||inp.type==='hidden'||inp.disabled) return false;
+      return isVisible(inp);
+    });
+    return cands[0] || null;
   }
   function findNativeYes(scope){
     const dlg = scope || document;
@@ -185,113 +109,167 @@
     if (!yes) yes = dlg.querySelector('button[class*="confirmButton"], a[class*="confirmButton"], button[class*="primary"]');
     return yes || null;
   }
-
-  const POS_KEY = 'imYesFloatPos';
-  const VIS_KEY = 'imYesFloatVisible';
-  function loadPos(){
-    try{ const p = JSON.parse(localStorage.getItem(POS_KEY)||''); if (p && Number.isFinite(p.left) && Number.isFinite(p.top)) return p; }catch{}
-    return { left: window.innerWidth - 140, top: Math.round(window.innerHeight*0.18) };
+  function findDialog(){
+    const list = document.querySelectorAll(
+      '[role="dialog"], [class*="modal"], [class*="Dialog"], [class*="dialog"], .confirmWrapper, .ui-dialog, .popup, [class*="confirmWrapper"]'
+    );
+    const vis = Array.from(list).filter(isVisible);
+    return vis.pop() || null;
   }
-  function clamp(val,min,max){ return Math.max(min, Math.min(max, val)); }
 
-  function ensureFloatYes(){
-    let btn = document.querySelector('.im-yes-float');
+  // ---------- Find cheapest visible row ----------
+  function getCheapestRow(){
+    const rows = getRows();
+    let best = null, bestPrice = Infinity;
+    for (const row of rows){
+      const price = parseMoney(row.querySelector(SEL.price)?.textContent);
+      if (Number.isFinite(price) && price < bestPrice){
+        best = row; bestPrice = price;
+      }
+    }
+    return { row: best, unit: Number.isFinite(bestPrice) ? bestPrice : NaN };
+  }
+
+  // ---------- Floating chips (YES + FILL MAX) ----------
+  const YES_POS_KEY = 'imYesFloatPos';
+  const YES_VIS_KEY = 'imYesFloatVisible';
+  const FILL_POS_KEY = 'imFillFloatPos';
+  const FILL_VIS_KEY = 'imFillFloatVisible';
+
+  function loadPos(key, def){
+    try{ const p = JSON.parse(localStorage.getItem(key)||''); if (p && Number.isFinite(p.left) && Number.isFinite(p.top)) return p; }catch{}
+    return def;
+  }
+  function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
+
+  function makeDraggable(btn, key){
+    let dragging=false, sx=0, sy=0, startLeft=0, startTop=0;
+    const onDown = (e)=>{
+      e.preventDefault(); e.stopPropagation();
+      dragging=true; btn.style.cursor='grabbing';
+      const pos = btn.getBoundingClientRect();
+      sx = e.clientX; sy = e.clientY; startLeft = pos.left; startTop = pos.top;
+      window.addEventListener('mousemove', onMove, true);
+      window.addEventListener('mouseup', onUp, true);
+    };
+    const onMove = (e)=>{
+      if (!dragging) return;
+      const nl = clamp(startLeft + (e.clientX - sx), 4, window.innerWidth - btn.offsetWidth - 4);
+      const nt = clamp(startTop + (e.clientY - sy), 4, window.innerHeight - btn.offsetHeight - 4);
+      btn.style.left = nl + 'px';
+      btn.style.top  = nt + 'px';
+      btn.style.right = ''; btn.style.bottom = '';
+    };
+    const onUp = ()=>{
+      if (!dragging) return;
+      dragging=false; btn.style.cursor='grab';
+      window.removeEventListener('mousemove', onMove, true);
+      window.removeEventListener('mouseup', onUp, true);
+      const rect = btn.getBoundingClientRect();
+      localStorage.setItem(key, JSON.stringify({left: rect.left, top: rect.top}));
+    };
+    btn.addEventListener('mousedown', onDown, true);
+  }
+
+  function ensureYesChip(){
+    let btn = document.querySelector('.im-chip.im-yes');
     if (!btn){
       btn = document.createElement('button');
-      btn.className = 'im-yes-float';
+      btn.className = 'im-chip im-yes';
       btn.textContent = 'YES';
       document.body.appendChild(btn);
-
-      // drag
-      let dragging=false, sx=0, sy=0, startLeft=0, startTop=0;
-      const onDown = (e)=>{
-        e.preventDefault(); e.stopPropagation();
-        dragging=true; btn.style.cursor='grabbing';
-        const pos = btn.getBoundingClientRect();
-        sx = e.clientX; sy = e.clientY; startLeft = pos.left; startTop = pos.top;
-        window.addEventListener('mousemove', onMove, true);
-        window.addEventListener('mouseup', onUp, true);
-      };
-      const onMove = (e)=>{
-        if (!dragging) return;
-        const nl = clamp(startLeft + (e.clientX - sx), 4, window.innerWidth - btn.offsetWidth - 4);
-        const nt = clamp(startTop + (e.clientY - sy), 4, window.innerHeight - btn.offsetHeight - 4);
-        btn.style.left = nl + 'px';
-        btn.style.top  = nt + 'px';
-        btn.style.right = ''; btn.style.bottom = '';
-      };
-      const onUp = ()=>{
-        if (!dragging) return;
-        dragging=false; btn.style.cursor='grab';
-        window.removeEventListener('mousemove', onMove, true);
-        window.removeEventListener('mouseup', onUp, true);
-        const rect = btn.getBoundingClientRect();
-        localStorage.setItem(POS_KEY, JSON.stringify({left: rect.left, top: rect.top}));
-      };
-      btn.addEventListener('mousedown', onDown, true);
-
-      // click -> native Yes
+      makeDraggable(btn, YES_POS_KEY);
+      // Click -> native Yes
       btn.addEventListener('click', (e)=>{
         e.preventDefault(); e.stopPropagation();
         const dlg = findDialog();
         const yes = findNativeYes(dlg || document);
         if (yes) yes.click();
       }, {capture:true});
-
-      // restore pos & visibility
-      const pos = loadPos();
-      btn.style.left = pos.left + 'px';
-      btn.style.top  = pos.top + 'px';
-      const visible = localStorage.getItem(VIS_KEY);
+      // Position & visibility
+      const pos = loadPos(YES_POS_KEY, { left: window.innerWidth - 140, top: Math.round(window.innerHeight*0.18) });
+      btn.style.left = pos.left + 'px'; btn.style.top = pos.top + 'px';
+      const visible = localStorage.getItem(YES_VIS_KEY);
       if (visible === 'hidden') btn.classList.add('hidden');
     }
     return btn;
   }
 
-  function updateFloatState(){
-    const btn = ensureFloatYes();
-    const dlg = findDialog();
-    if (dlg){ btn.classList.add('active'); }
-    else { btn.classList.remove('active'); }
+  function ensureFillChip(){
+    let btn = document.querySelector('.im-chip.im-fill-chip');
+    if (!btn){
+      btn = document.createElement('button');
+      btn.className = 'im-chip im-chip-fill im-fill-chip';
+      btn.textContent = 'FILL MAX';
+      document.body.appendChild(btn);
+      makeDraggable(btn, FILL_POS_KEY);
+      // Click -> prefill cheapest
+      btn.addEventListener('click', async (e)=>{
+        e.preventDefault(); e.stopPropagation();
+        const {row, unit} = getCheapestRow();
+        if (!row || !Number.isFinite(unit)) return;
+        const qty = toInt(row.querySelector(SEL.qtyCell)?.textContent);
+        const wallet = getWalletFromHeader();
+        const afford = computeAfford(wallet, unit, qty);
+        await ensureControlsOpen(row);
+        const input = findAmountInputForRow(row);
+        if (input){
+          setInputValue(input, afford>0?afford:'');
+          if (afford<=0) input.placeholder='Insufficient funds';
+          // brief flash
+          input.style.boxShadow='0 0 0 3px rgba(14,165,233,.55)';
+          setTimeout(()=>{ input.style.boxShadow=''; }, 250);
+          // optional: scroll the row into view so you see it fill
+          row.scrollIntoView({behavior:'smooth', block:'center'});
+        }
+      }, {capture:true});
+      // Position & visibility
+      const pos = loadPos(FILL_POS_KEY, { left: window.innerWidth - 240, top: Math.round(window.innerHeight*0.18) + 60 });
+      btn.style.left = pos.left + 'px'; btn.style.top = pos.top + 'px';
+      const visible = localStorage.getItem(FILL_VIS_KEY);
+      if (visible === 'hidden') btn.classList.add('hidden');
+    }
+    return btn;
   }
 
-  // Hotkeys
+  function updateYesActive(){
+    const btn = ensureYesChip();
+    const dlg = findDialog();
+    if (dlg) btn.classList.add('active'); else btn.classList.remove('active');
+  }
+
+  // ---------- Hotkeys ----------
   window.addEventListener('keydown', (e)=>{
-    // Alt+Y: click
+    // Alt+Y: click YES
     if (e.altKey && !e.ctrlKey && e.code === 'KeyY'){
-      const btn = document.querySelector('.im-yes-float');
-      if (btn && !btn.classList.contains('hidden')) btn.click();
+      const btn = ensureYesChip();
+      if (!btn.classList.contains('hidden')) btn.click();
     }
-    // Ctrl+Alt+Y: toggle show/hide
+    // Ctrl+Alt+Y: toggle YES
     if (e.altKey && e.ctrlKey && e.code === 'KeyY'){
-      const btn = ensureFloatYes();
+      const btn = ensureYesChip();
       btn.classList.toggle('hidden');
-      localStorage.setItem(VIS_KEY, btn.classList.contains('hidden') ? 'hidden' : 'visible');
+      localStorage.setItem(YES_VIS_KEY, btn.classList.contains('hidden') ? 'hidden' : 'visible');
+    }
+    // Alt+F: click FILL MAX (cheapest)
+    if (e.altKey && !e.ctrlKey && e.code === 'KeyF'){
+      const btn = ensureFillChip();
+      if (!btn.classList.contains('hidden')) btn.click();
+    }
+    // Ctrl+Alt+F: toggle FILL MAX
+    if (e.altKey && e.ctrlKey && e.code === 'KeyF'){
+      const btn = ensureFillChip();
+      btn.classList.toggle('hidden');
+      localStorage.setItem(FILL_VIS_KEY, btn.classList.contains('hidden') ? 'hidden' : 'visible');
     }
   }, true);
 
   // ---------- Observers ----------
-  const rowsMO = new MutationObserver(()=>refreshRows());
-  rowsMO.observe(document.documentElement, {childList:true, subtree:true});
-
-  const dialogMO = new MutationObserver(()=>updateFloatState());
+  const dialogMO = new MutationObserver(()=>updateYesActive());
   dialogMO.observe(document.documentElement, {childList:true, subtree:true});
 
-  document.addEventListener('click', (ev)=>{
-    const t = ev.target; if (!t) return;
-    const txt = (t.textContent || '').toLowerCase();
-    if (!/(^|\b)(buy|purchase|confirm)(\b|!|\.|,)/.test(txt)) return;
-    let tries = 0;
-    const iv = setInterval(()=>{
-      tries++;
-      updateFloatState();
-      if (tries>60) clearInterval(iv);
-    }, 50);
-  }, true);
-
   // ---------- Bootstrap ----------
-  setTimeout(refreshRows,200);
-  setTimeout(refreshRows,800);
-  setInterval(refreshRows,2000);
-  setInterval(updateFloatState, 400);
+  ensureYesChip();
+  ensureFillChip();
+  updateYesActive();
 })();
