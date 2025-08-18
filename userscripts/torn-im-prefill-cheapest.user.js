@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Item Market — Floating Fill Max (Top Row) + Floating YES
+// @name         Torn Item Market — Floating Fill Max (Top Row) + Floating BUY + Floating YES
 // @namespace    https://torn.city/
-// @version      2.12.4
-// @description  Floating, draggable "FILL MAX" that fills the TOP visible listing with max affordable qty; floating, draggable "YES" forwards to Torn’s native confirm. Alt+F / Alt+Y to trigger; Ctrl+Alt+F / Ctrl+Alt+Y to show/hide. Positions persist.
+// @version      2.13.0
+// @description  Floating, draggable chips: FILL MAX pre-fills TOP listing with max affordable qty; BUY clicks TOP listing's native Buy; YES forwards to Torn’s native confirm. Positions persist. Hotkeys: Alt+F / Alt+B / Alt+Y (Ctrl+Alt+* toggles visibility).
 // @author       Baz
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
@@ -32,6 +32,9 @@
 
     .im-chip-fill{ border-color:#0ea5e9; color:#0ea5e9; background:rgba(14,165,233,.12); }
     .im-chip-fill:hover{ background:rgba(14,165,233,.20); }
+
+    .im-chip-buy{ border-color:#f59e0b; color:#f59e0b; background:rgba(245,158,11,.12);}
+    .im-chip-buy:hover{ background:rgba(245,158,11,.20); }
   `);
 
   const SEL = {
@@ -42,6 +45,7 @@
     qtyCell: 'div[class*="available"]',
     showBtn: 'button[class*="showBuyControlsButton"]',
     amountInputs: 'input:not([type="checkbox"]):not([type="hidden"])',
+    buttons: 'button, a, [role="button"]',
   };
 
   const isVisible = el => !!el && el.getBoundingClientRect().width>0 && el.getBoundingClientRect().height>0 && getComputedStyle(el).visibility!=='hidden';
@@ -97,10 +101,9 @@
     input.blur();
   }
 
-  // --- NEW: pick the TOP visible seller row (first in list) ---
+  // TOP visible row
   function getTopRow(){
     const rows = getRows();
-    // Prefer the one with the smallest document Y (topmost)
     let top = null, bestY = Infinity;
     for (const row of rows){
       const y = row.getBoundingClientRect().top;
@@ -112,7 +115,17 @@
     return { row: top, unit, qty };
   }
 
-  // ----- Confirm dialog helpers for floating YES -----
+  // Find row's native BUY button
+  function findNativeBuyButton(row){
+    const wrap = getRowWrapper(row) || row;
+    const btn = Array.from(wrap.querySelectorAll(SEL.buttons)).find(b=>{
+      const t=(b.textContent||'').trim().toLowerCase();
+      return t && /\bbuy\b/.test(t);
+    });
+    return btn || null;
+  }
+
+  // Confirm dialog helpers (for YES)
   function findDialog(){
     const list = document.querySelectorAll('[role="dialog"], [class*="modal"], [class*="Dialog"], [class*="dialog"], .confirmWrapper, .ui-dialog, .popup, [class*="confirmWrapper"]');
     const vis = Array.from(list).filter(isVisible);
@@ -121,15 +134,16 @@
   function findNativeYes(scope){
     const dlg = scope || document;
     const labels = /(^(yes|confirm|buy|purchase|ok|proceed)\b)|(\b(confirm purchase|confirm order|buy now)\b)/i;
-    const btns = Array.from(dlg.querySelectorAll('button, a, [role="button"]'));
+    const btns = Array.from(dlg.querySelectorAll(SEL.buttons));
     let yes = btns.find(b=>labels.test((b.textContent||'').trim()));
     if (!yes) yes = dlg.querySelector('button[class*="confirmButton"], a[class*="confirmButton"], button[class*="primary"]');
     return yes || null;
   }
 
-  // ----- Floating chips -----
+  // Floating chips
   const YES_POS_KEY='imYesFloatPos', YES_VIS_KEY='imYesFloatVisible';
   const FILL_POS_KEY='imFillFloatPos', FILL_VIS_KEY='imFillFloatVisible';
+  const BUY_POS_KEY='imBuyFloatPos',  BUY_VIS_KEY='imBuyFloatVisible';
 
   function loadPos(key, def){
     try{ const p = JSON.parse(localStorage.getItem(key)||''); if (p && Number.isFinite(p.left) && Number.isFinite(p.top)) return p; }catch{}
@@ -165,62 +179,83 @@
     btn.addEventListener('mousedown', onDown, true);
   }
 
-  function ensureYesChip(){
-    let btn=document.querySelector('.im-chip.im-yes');
+  function makeChip({className, text, posKey, visKey, onClick, defaultPos}){
+    let btn=document.querySelector(`.${className}`);
     if (!btn){
       btn=document.createElement('button');
-      btn.className='im-chip im-yes';
-      btn.textContent='YES';
+      btn.className=`im-chip ${className}`;
+      btn.textContent=text;
       document.body.appendChild(btn);
-      makeDraggable(btn, YES_POS_KEY);
-      btn.addEventListener('click',(e)=>{
-        e.preventDefault(); e.stopPropagation();
-        const dlg=findDialog(); const yes=findNativeYes(dlg||document);
-        if (yes) yes.click();
-      },{capture:true});
-      const pos=loadPos(YES_POS_KEY,{left:window.innerWidth-140, top:Math.round(window.innerHeight*0.18)});
+      makeDraggable(btn, posKey);
+      btn.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); onClick?.(); }, {capture:true});
+      const pos=loadPos(posKey, defaultPos);
       btn.style.left=pos.left+'px'; btn.style.top=pos.top+'px';
-      const vis=localStorage.getItem(YES_VIS_KEY); if (vis==='hidden') btn.classList.add('hidden');
+      const vis=localStorage.getItem(visKey); if (vis==='hidden') btn.classList.add('hidden');
     }
     return btn;
   }
 
+  function ensureYesChip(){
+    return makeChip({
+      className:'im-yes',
+      text:'YES',
+      posKey:YES_POS_KEY,
+      visKey:YES_VIS_KEY,
+      defaultPos:{left:window.innerWidth-140, top:Math.round(window.innerHeight*0.18)},
+      onClick:()=>{ const dlg=findDialog(); const yes=findNativeYes(dlg||document); if (yes) yes.click(); }
+    });
+  }
+
   function ensureFillChip(){
-    let btn=document.querySelector('.im-chip.im-fill-chip');
-    if (!btn){
-      btn=document.createElement('button');
-      btn.className='im-chip im-chip-fill im-fill-chip';
-      btn.textContent='FILL MAX';
-      document.body.appendChild(btn);
-      makeDraggable(btn, FILL_POS_KEY);
-
-      btn.addEventListener('click', async (e)=>{
-        e.preventDefault(); e.stopPropagation();
-
-        const {row, unit, qty} = getTopRow(); // <-- TOP ROW now
+    return makeChip({
+      className:'im-chip-fill im-fill-chip',
+      text:'FILL MAX',
+      posKey:FILL_POS_KEY,
+      visKey:FILL_VIS_KEY,
+      defaultPos:{left:window.innerWidth-240, top:Math.round(window.innerHeight*0.18)+60},
+      onClick: async ()=>{
+        const {row, unit, qty} = getTopRow();
         if (!row || !Number.isFinite(unit)) return;
-
         const wrap = getRowWrapper(row);
         const wallet = getWalletFromHeader();
         const afford = computeAfford(wallet, unit, qty);
-
         await ensureControlsOpen(row);
         const input = await findQtyInputWithRetries(wrap, 30, 50);
         if (!input) return;
-
         setInputValue(input, afford>0?afford:'');
         if (afford<=0) input.placeholder='Insufficient funds';
-
-        input.style.boxShadow='0 0 0 3px rgba(14,165,233,.55)';
-        setTimeout(()=>{ input.style.boxShadow=''; }, 260);
+        input.style.boxShadow='0 0 0 3px rgba(14,165,233,.55)'; setTimeout(()=>{ input.style.boxShadow=''; }, 260);
         wrap?.scrollIntoView({behavior:'smooth', block:'center'});
-      },{capture:true});
+      }
+    });
+  }
 
-      const pos=loadPos(FILL_POS_KEY,{left:window.innerWidth-240, top:Math.round(window.innerHeight*0.18)+60});
-      btn.style.left=pos.left+'px'; btn.style.top=pos.top+'px';
-      const vis=localStorage.getItem(FILL_VIS_KEY); if (vis==='hidden') btn.classList.add('hidden');
-    }
-    return btn;
+  function ensureBuyChip(){
+    return makeChip({
+      className:'im-chip-buy im-buy-chip',
+      text:'BUY',
+      posKey:BUY_POS_KEY,
+      visKey:BUY_VIS_KEY,
+      defaultPos:{left:window.innerWidth-140, top:Math.round(window.innerHeight*0.18)+60},
+      onClick: async ()=>{
+        const {row} = getTopRow();
+        if (!row) return;
+        await ensureControlsOpen(row);
+        const wrap = getRowWrapper(row) || row;
+        // Try to click the row's native BUY
+        const buy = findNativeBuyButton(row);
+        if (buy){ buy.click(); }
+        else {
+          // Fallback: focus qty to force UI, then retry once
+          const inp = await findQtyInputWithRetries(wrap, 10, 40);
+          if (inp) inp.focus();
+          await sleep(50);
+          const buy2 = findNativeBuyButton(row);
+          if (buy2) buy2.click();
+        }
+        // Confirm dialog should pop → your floating YES will brighten
+      }
+    });
   }
 
   function updateYesActive(){
@@ -231,17 +266,24 @@
 
   // Hotkeys
   window.addEventListener('keydown',(e)=>{
+    // YES
     if (e.altKey && !e.ctrlKey && e.code==='KeyY'){ const b=ensureYesChip(); if(!b.classList.contains('hidden')) b.click(); }
     if (e.altKey && e.ctrlKey && e.code==='KeyY'){ const b=ensureYesChip(); b.classList.toggle('hidden'); localStorage.setItem(YES_VIS_KEY, b.classList.contains('hidden')?'hidden':'visible'); }
+    // FILL
     if (e.altKey && !e.ctrlKey && e.code==='KeyF'){ const b=ensureFillChip(); if(!b.classList.contains('hidden')) b.click(); }
     if (e.altKey && e.ctrlKey && e.code==='KeyF'){ const b=ensureFillChip(); b.classList.toggle('hidden'); localStorage.setItem(FILL_VIS_KEY, b.classList.contains('hidden')?'hidden':'visible'); }
+    // BUY
+    if (e.altKey && !e.ctrlKey && e.code==='KeyB'){ const b=ensureBuyChip(); if(!b.classList.contains('hidden')) b.click(); }
+    if (e.altKey && e.ctrlKey && e.code==='KeyB'){ const b=ensureBuyChip(); b.classList.toggle('hidden'); localStorage.setItem(BUY_VIS_KEY, b.classList.contains('hidden')?'hidden':'visible'); }
   }, true);
 
-  // Observers / bootstrap
+  // Observer for YES active state
   const dialogMO=new MutationObserver(()=>updateYesActive());
   dialogMO.observe(document.documentElement,{childList:true,subtree:true});
 
-  ensureYesChip();
+  // Bootstrap
   ensureFillChip();
+  ensureBuyChip();
+  ensureYesChip();
   updateYesActive();
 })();
