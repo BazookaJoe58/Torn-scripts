@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Item Market — Prefill (Dialog MADE Yes top-right)
 // @namespace    https://torn.city/
-// @version      2.9.2
-// @description  Adds a NEW “Yes” button in Torn’s confirm dialog (top-right, just left of the X). Clicking it forwards to the native Yes. Also keeps the row Fill Max overlay on Buy (25% right overlay). No confirm bypass, only UI sugar.
+// @version      2.9.3
+// @description  Adds a NEW “Yes” button in Torn’s confirm dialog (top-right, just left of the X). Clicking it forwards to the native Yes. Also keeps the row Fill Max overlay on Buy (rightmost 25%). No confirm bypass; only UI sugar. (v2.9.3 = robustness only; same visuals/behavior as 2.9.2)
 // @author       Baz
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
@@ -111,7 +111,7 @@
     input.dispatchEvent(new Event('change',{bubbles:true}));
     input.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true, key:'0'}));
   }
-  function flash(el){ el.classList.add('im-flash'); setTimeout(()=>el.classList.remove('im-flash'),280); }
+  function flash(el){ el && el.classList.add('im-flash'); setTimeout(()=>el && el.classList.remove('im-flash'),280); }
 
   // --- row overlay ---
   function positionOverlay(overlay, nativeBtn){
@@ -164,32 +164,49 @@
     for (const row of getRows()) placeRowOverlay(row);
   }
 
-  // --- confirm dialog helpers ---
+  // --- confirm dialog helpers (robust) ---
   function findDialog(){
-    const list = document.querySelectorAll(
-      '[role="dialog"], [class*="modal"], [class*="Dialog"], [class*="dialog"], .confirmWrapper, .ui-dialog, .popup'
-    );
-    const vis = Array.from(list).filter(el=>{
-      const r=el.getBoundingClientRect(); return r.width>0 && r.height>0;
-    });
-    return vis.pop() || null;
+    const qs = [
+      '[role="dialog"][aria-modal="true"]',
+      '[role="dialog"]',
+      '[class*="modal"]',
+      '[class*="Dialog"]',
+      '[class*="dialog"]',
+      '.confirmWrapper',
+      '.ui-dialog',
+      '.popup',
+      '[data-testid*="confirm"]',
+      '[data-test*="confirm"]'
+    ].join(',');
+    const all = document.querySelectorAll(qs);
+    let best=null, area=0;
+    for (const el of all){
+      const r=el.getBoundingClientRect();
+      if (r.width>0 && r.height>0){
+        const a=r.width*r.height;
+        if (a>area){ best=el; area=a; }
+      }
+    }
+    return best;
   }
   function findCloseX(dialog){
-    return dialog.querySelector('button[aria-label="Close"], [class*="close"], .close, .ui-dialog-titlebar-close, [data-role="close"]');
+    return dialog.querySelector('button[aria-label="Close"], [class*="close"], .close, .ui-dialog-titlebar-close, [data-role="close"], [data-testid*="close"]');
   }
   function findNativeYes(dialog){
+    if (!dialog) return null;
     const btns = dialog.querySelectorAll('button, a, [role="button"]');
     for (const b of btns){
       const t=(b.textContent||'').trim().toLowerCase();
       if (/(^|\b)(yes|confirm|buy|purchase|ok|proceed)(\b|!|\.|,)/.test(t)) return b;
     }
-    const byClass = dialog.querySelector('button[class*="confirmButton"]');
-    return byClass || null;
+    return dialog.querySelector('button[class*="confirm"], a[class*="confirm"]');
   }
 
   function makeYesTopRight(dialog){
     if (!dialog || dialog.querySelector('.im-yes-made')) return;
-    const yes=findNativeYes(dialog); if (!yes) return;
+
+    const yes=findNativeYes(dialog);
+    if (!yes) return;
 
     const cs=getComputedStyle(dialog);
     if (cs.position==='static') dialog.style.position='relative';
@@ -198,54 +215,69 @@
     made.type='button';
     made.className='im-yes-made';
     made.textContent=(yes.textContent||'Yes').trim();
+    made.style.zIndex='2147483646';
 
-    const pr = dialog.getBoundingClientRect();
-    const xBtn = findCloseX(dialog);
-    const xr  = xBtn ? xBtn.getBoundingClientRect() : {left: pr.right - 12, width: 12};
-    const topPad = 8, gap = 8, width = Math.max(70, yes.getBoundingClientRect().width);
+    const posIt = () => {
+      const pr = dialog.getBoundingClientRect();
+      const xBtn = findCloseX(dialog);
+      const xr  = xBtn ? xBtn.getBoundingClientRect() : {left: pr.right - 12, width: 12};
+      const gap = 8;
 
-    made.style.top = `${topPad}px`;
-    const rightPx = Math.max(8, (pr.right - xr.left) + gap);
-    made.style.right = `${rightPx}px`;
-    made.style.width = `${width}px`;
-    const yh = yes.getBoundingClientRect().height;
-    if (yh>0) made.style.height = `${yh}px`;
+      const baseW = (findNativeYes(dialog)?.getBoundingClientRect().width) || 90;
+      const baseH = (findNativeYes(dialog)?.getBoundingClientRect().height) || 28;
 
-    made.addEventListener('click', (e)=>{
-      e.preventDefault(); e.stopPropagation(); yes.click();
-    }, {capture:true});
+      made.style.width  = `${Math.max(70, baseW)}px`;
+      made.style.height = `${Math.max(28, baseH)}px`;
+      made.style.top    = `8px`;
+      made.style.right  = `${Math.max(8, (pr.right - xr.left) + gap)}px`; // same visual as 2.9.2
+    };
 
+    made.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); findNativeYes(dialog)?.click(); }, {capture:true});
     dialog.appendChild(made);
 
-    const ro = new ResizeObserver(()=>{
-      const pr2 = dialog.getBoundingClientRect();
-      const xr2 = (findCloseX(dialog)?.getBoundingClientRect()) || {left: pr2.right - 12, width: 12};
-      const rightPx2 = Math.max(8, (pr2.right - xr2.left) + gap);
-      made.style.right = `${rightPx2}px`;
-    });
+    posIt();
+    const ro=new ResizeObserver(posIt);
     ro.observe(dialog);
-    window.addEventListener('scroll', ()=>{
-      const pr2 = dialog.getBoundingClientRect();
-      const xr2 = (findCloseX(dialog)?.getBoundingClientRect()) || {left: pr2.right - 12, width: 12};
-      const rightPx2 = Math.max(8, (pr2.right - xr2.left) + gap);
-      made.style.right = `${rightPx2}px`;
-    }, {passive:true});
+    window.addEventListener('scroll', posIt, {passive:true});
   }
 
+  // Mount when dialog appears (short reliable poll like 2.9.2)
   const dialogMO = new MutationObserver(()=>{
     const dlg = findDialog();
     if (dlg){
       let tries = 0;
       const iv = setInterval(()=>{
-        tries++; makeYesTopRight(dlg);
+        tries++;
+        makeYesTopRight(dlg);
         if (dlg.querySelector('.im-yes-made') || tries>40) clearInterval(iv);
       }, 50);
     }
   });
   dialogMO.observe(document.documentElement, {childList:true, subtree:true});
 
+  // Also: hook Buy/Confirm clicks and try for up to ~5s (handles other scripts crashing mid-render)
+  document.addEventListener('click', (ev)=>{
+    const t = ev.target;
+    if (!t) return;
+    const txt = (t.textContent || '').toLowerCase();
+    if (!/(^|\b)(buy|purchase|confirm)(\b|!|\.|,)/.test(txt)) return;
+
+    let tries = 0;
+    const iv = setInterval(()=>{
+      tries++;
+      const dlg = findDialog();
+      if (dlg){
+        makeYesTopRight(dlg);
+        if (dlg.querySelector('.im-yes-made')) clearInterval(iv);
+      }
+      if (tries > 100) clearInterval(iv); // ~5s
+    }, 50);
+  }, true);
+
+  // safety sweep (dialog might already be open)
   setInterval(()=>{ const dlg=findDialog(); if (dlg) makeYesTopRight(dlg); }, 300);
 
+  // bootstrap rows
   const docMO=new MutationObserver(()=>{
     if (docMO._raf) cancelAnimationFrame(docMO._raf);
     docMO._raf=requestAnimationFrame(()=>setTimeout(refreshRows,30));
