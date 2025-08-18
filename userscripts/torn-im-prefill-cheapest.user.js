@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Item Market — Prefill (Fill Max + Classic Yes Clone)
+// @name         Torn Item Market — Prefill (Fill Max + Inline Yes Clone)
 // @namespace    https://torn.city/
-// @version      2.9.9
-// @description  Row: rightmost 25% "Fill Max". Confirm: classic Yes clone (same dialog as Torn’s), simple selectors & timing like the last known-good build. No extra UI.
+// @version      2.10.0
+// @description  Row: rightmost 25% "Fill Max" overlay fills max affordable into qty. Confirm: clone the native "Yes" INSIDE the confirmButtons row (next to Torn’s Yes), forwarding click to the native handler. No confirm bypass—just UI helpers.
 // @author       Baz
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
@@ -16,7 +16,7 @@
 
   // ---------- Styles ----------
   GM_addStyle(`
-    /* Fill Max overlay */
+    /* Fill Max overlay (unchanged) */
     .im-fill-overlay{
       position:absolute; display:flex; align-items:center; justify-content:center;
       cursor:pointer; font-size:11px; font-weight:600;
@@ -28,21 +28,19 @@
     .im-fill-overlay.im-done{ z-index:-1; pointer-events:none; background:transparent; border-color:transparent }
     .im-flash{ box-shadow:0 0 0 3px rgba(0,160,255,.55)!important; transition:box-shadow .25s ease }
 
-    /* Classic in-dialog Yes clone */
-    .im-yes-made {
-      position:absolute !important;
-      z-index:2147483646 !important;
-      padding:6px 10px !important;
-      border-radius:6px !important;
-      border:1px solid var(--tt-color-green, #16a34a) !important;
-      background:rgba(22,163,74,.12) !important;
-      color:#16a34a !important;
-      font-weight:600 !important;
-      cursor:pointer !important;
-      display:flex; align-items:center; justify-content:center;
-      line-height:1 !important;
+    /* Inline YES clone inside confirmButtons */
+    .im-yes-clone-inline{
+      margin-left: 8px !important;
+      padding: 6px 10px !important;
+      border-radius: 6px !important;
+      border: 1px solid var(--tt-color-green, #16a34a) !important;
+      background: rgba(22,163,74,.12) !important;
+      color: #16a34a !important;
+      font-weight: 600 !important;
+      cursor: pointer !important;
+      z-index: 2147483646 !important;
     }
-    .im-yes-made:hover{ background:rgba(22,163,74,.20) !important; }
+    .im-yes-clone-inline:hover{ background: rgba(22,163,74,.20) !important; }
   `);
 
   // ---------- Selectors & utils ----------
@@ -60,7 +58,7 @@
   const parseMoney = (s)=>{ s=String(s||'').replace(/[^\d.]/g,''); return s?Math.floor(Number(s)):NaN; };
   const toInt = (s)=>{ const m=String(s||'').match(/\d[\d,]*/); return m?Number(m[0].replace(/[^\d]/g,'')):NaN; };
 
-  // ---------- Fill Max (kept as your working version) ----------
+  // ---------- Fill Max (unchanged) ----------
   function getRows(){
     const list=document.querySelector(SEL.list); if (!list) return [];
     return Array.from(list.querySelectorAll(`${SEL.rowWrapper} > ${SEL.row}`)).filter(r=>r.offsetParent!==null);
@@ -164,89 +162,71 @@
     for (const row of getRows()) placeRowOverlay(row);
   }
 
-  // ---------- Classic Confirm Dialog Yes clone ----------
+  // ---------- Confirm dialog: inline clone of native "Yes" ----------
   function findDialog(){
-    // EXACT style used when it worked: collect candidates, return the LAST visible (vis.pop()).
     const list = document.querySelectorAll(
+      // same family as your screenshot: confirmWrapper / confirmButtons live under here
       '[role="dialog"], [class*="modal"], [class*="Dialog"], [class*="dialog"], .confirmWrapper, .ui-dialog, .popup'
     );
     const vis = Array.from(list).filter(el=>{
       const r=el.getBoundingClientRect(); return r.width>0 && r.height>0;
     });
-    return vis.pop() || null;
+    return vis.pop() || null; // last visible (matches your working build)
   }
-  function findCloseX(dialog){
-    return dialog.querySelector('button[aria-label="Close"], [class*="close"], .close, .ui-dialog-titlebar-close, [data-role="close"]');
-  }
+
   function findNativeYes(dialog){
-    // Same simple matcher as before
     const btns = dialog.querySelectorAll('button, a, [role="button"]');
     for (const b of btns){
       const t=(b.textContent||'').trim().toLowerCase();
       if (/(^|\b)(yes|confirm|buy|purchase|ok|proceed)(\b|!|\.|,)/.test(t)) return b;
     }
-    const byClass = dialog.querySelector('button[class*="confirmButton"]');
-    return byClass || null;
-  }
-  function makeYesTopRight(dialog){
-    if (!dialog || dialog.querySelector('.im-yes-made')) return;
-
-    const yes=findNativeYes(dialog);
-    if (!yes) return; // wait for native button to mount
-
-    // ensure dialog can host absolute child
-    const cs=getComputedStyle(dialog);
-    if (cs.position==='static') dialog.style.position='relative';
-
-    const made=document.createElement('button');
-    made.type='button';
-    made.className='im-yes-made';
-    made.textContent=(yes.textContent||'Yes').trim();
-
-    // position near the X (left of it)
-    const pr = dialog.getBoundingClientRect();
-    const xBtn = findCloseX(dialog);
-    const xr  = xBtn ? xBtn.getBoundingClientRect() : {left: pr.right - 12, width: 12};
-    const topPad = 8, gap = 8, width = Math.max(70, yes.getBoundingClientRect().width);
-
-    made.style.top = `${topPad}px`;
-    const rightPx = Math.max(8, (pr.right - xr.left) + gap);
-    made.style.right = `${rightPx}px`;
-    made.style.width = `${width}px`;
-    const yh = yes.getBoundingClientRect().height;
-    if (yh>0) made.style.height = `${yh}px`;
-
-    // Forward click to native Yes
-    made.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); yes.click(); }, {capture:true});
-
-    dialog.appendChild(made);
-
-    // keep it pinned if the dialog reflows (lightweight, like before)
-    const ro = new ResizeObserver(()=>{
-      const pr2 = dialog.getBoundingClientRect();
-      const xr2 = (findCloseX(dialog)?.getBoundingClientRect()) || {left: pr2.right - 12, width: 12};
-      const rightPx2 = Math.max(8, (pr2.right - xr2.left) + gap);
-      made.style.right = `${rightPx2}px`;
-    });
-    ro.observe(dialog);
+    // class hint from your inspector (e.g., confirmButton__…)
+    return dialog.querySelector('button[class*="confirmButton"]');
   }
 
-  // Mount when dialog appears — short poll up to ~2s (40 * 50ms), same as before
+  function findButtonsContainer(dialog){
+    // prefer the explicit confirm buttons container if present
+    return dialog.querySelector('[class*="confirmButtons"]') || dialog;
+  }
+
+  function makeYesInline(dialog){
+    if (!dialog || dialog.querySelector('.im-yes-clone-inline')) return;
+
+    const nativeYes = findNativeYes(dialog);
+    if (!nativeYes) return; // wait until native mounts
+
+    // clone a clean button (don’t copy listeners)
+    const cloned = document.createElement('button');
+    cloned.type = 'button';
+    cloned.className = 'im-yes-clone-inline';
+    cloned.textContent = (nativeYes.textContent || 'Yes').trim();
+
+    cloned.addEventListener('click', (e)=>{
+      e.preventDefault(); e.stopPropagation();
+      nativeYes.click(); // forward to Torn’s handler
+    }, {capture:true});
+
+    // append inside the same button row, after the native Yes
+    const container = findButtonsContainer(dialog);
+    if (nativeYes.nextSibling) nativeYes.parentNode.insertBefore(cloned, nativeYes.nextSibling);
+    else container.appendChild(cloned);
+  }
+
+  // Observe for dialog mounts & build inline Yes
   const dialogMO = new MutationObserver(()=>{
     const dlg = findDialog();
-    if (dlg){
-      let tries = 0;
-      const iv = setInterval(()=>{
-        tries++;
-        makeYesTopRight(dlg);
-        if (dlg.querySelector('.im-yes-made') || tries>40) clearInterval(iv);
-      }, 50);
-    }
+    if (!dlg) return;
+    let tries = 0;
+    const iv = setInterval(()=>{
+      tries++;
+      makeYesInline(dlg);
+      if (dlg.querySelector('.im-yes-clone-inline') || tries > 40) clearInterval(iv);
+    }, 50);
   });
   dialogMO.observe(document.documentElement, {childList:true, subtree:true});
 
-  // Safety net (dialog already open)
-  setInterval(()=>{ const dlg=findDialog(); if (dlg) makeYesTopRight(dlg); }, 300);
+  // Safety sweep: if a dialog is already open
+  setInterval(()=>{ const dlg=findDialog(); if (dlg) makeYesInline(dlg); }, 300);
 
   // ---------- Bootstrap ----------
   const docMO=new MutationObserver(()=>{
