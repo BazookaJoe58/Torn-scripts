@@ -7,8 +7,8 @@
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
 // @grant        GM_addStyle
-// @downloadURL  https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/main/userscripts/torn-im-prefill-cheapest.user.js
-// @updateURL    https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/main/userscripts/torn-im-prefill-cheapest.user.js
+// @downloadURL  https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/torn-im-prefill-cheapest.user.js
+// @updateURL    https://github.com/BazookaJoe58/Torn-scripts/raw/refs/heads/main/userscripts/torn-im-prefill-cheapest.user.js
 // ==/UserScript==
 
 (function () {
@@ -113,7 +113,7 @@
   }
   function flash(el){ el.classList.add('im-flash'); setTimeout(()=>el.classList.remove('im-flash'),280); }
 
-  // --- row overlay (kept minimal) ---
+  // --- row overlay ---
   function positionOverlay(overlay, nativeBtn){
     const parent=overlay.parentElement; if (!parent) return;
     const pr=parent.getBoundingClientRect(), br=nativeBtn.getBoundingClientRect();
@@ -166,7 +166,6 @@
 
   // --- confirm dialog helpers ---
   function findDialog(){
-    // Torn confirm shells typically match one of these
     const list = document.querySelectorAll(
       '[role="dialog"], [class*="modal"], [class*="Dialog"], [class*="dialog"], .confirmWrapper, .ui-dialog, .popup'
     );
@@ -179,7 +178,6 @@
     return dialog.querySelector('button[aria-label="Close"], [class*="close"], .close, .ui-dialog-titlebar-close, [data-role="close"]');
   }
   function findNativeYes(dialog){
-    // prefer buttons in container like .confirmButtons__*
     const btns = dialog.querySelectorAll('button, a, [role="button"]');
     for (const b of btns){
       const t=(b.textContent||'').trim().toLowerCase();
@@ -191,11 +189,8 @@
 
   function makeYesTopRight(dialog){
     if (!dialog || dialog.querySelector('.im-yes-made')) return;
+    const yes=findNativeYes(dialog); if (!yes) return;
 
-    const yes=findNativeYes(dialog);
-    if (!yes) return; // wait until the native button is present
-
-    // ensure dialog can host absolute child
     const cs=getComputedStyle(dialog);
     if (cs.position==='static') dialog.style.position='relative';
 
@@ -204,29 +199,24 @@
     made.className='im-yes-made';
     made.textContent=(yes.textContent||'Yes').trim();
 
-    // position near the X (left of it)
     const pr = dialog.getBoundingClientRect();
     const xBtn = findCloseX(dialog);
     const xr  = xBtn ? xBtn.getBoundingClientRect() : {left: pr.right - 12, width: 12};
     const topPad = 8, gap = 8, width = Math.max(70, yes.getBoundingClientRect().width);
 
     made.style.top = `${topPad}px`;
-    // right offset so it sits just to the left of the X
     const rightPx = Math.max(8, (pr.right - xr.left) + gap);
     made.style.right = `${rightPx}px`;
     made.style.width = `${width}px`;
     const yh = yes.getBoundingClientRect().height;
     if (yh>0) made.style.height = `${yh}px`;
 
-    // Forward click to native Yes
     made.addEventListener('click', (e)=>{
-      e.preventDefault(); e.stopPropagation();
-      yes.click();
+      e.preventDefault(); e.stopPropagation(); yes.click();
     }, {capture:true});
 
     dialog.appendChild(made);
 
-    // keep it pinned if the dialog reflows
     const ro = new ResizeObserver(()=>{
       const pr2 = dialog.getBoundingClientRect();
       const xr2 = (findCloseX(dialog)?.getBoundingClientRect()) || {left: pr2.right - 12, width: 12};
@@ -242,25 +232,20 @@
     }, {passive:true});
   }
 
-  // watch DOM for dialogs; create our Yes as soon as native Yes exists
   const dialogMO = new MutationObserver(()=>{
     const dlg = findDialog();
     if (dlg){
-      // run a short poll to wait for native Yes if it mounts a tick later
       let tries = 0;
       const iv = setInterval(()=>{
-        tries++;
-        makeYesTopRight(dlg);
+        tries++; makeYesTopRight(dlg);
         if (dlg.querySelector('.im-yes-made') || tries>40) clearInterval(iv);
       }, 50);
     }
   });
   dialogMO.observe(document.documentElement, {childList:true, subtree:true});
 
-  // safety net (dialog already open)
   setInterval(()=>{ const dlg=findDialog(); if (dlg) makeYesTopRight(dlg); }, 300);
 
-  // bootstrap rows
   const docMO=new MutationObserver(()=>{
     if (docMO._raf) cancelAnimationFrame(docMO._raf);
     docMO._raf=requestAnimationFrame(()=>setTimeout(refreshRows,30));
