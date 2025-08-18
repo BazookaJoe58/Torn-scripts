@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Item Market — Prefill (Right 25% Fill Max Overlay + Cheapest Confirm Align)
+// @name         Torn Item Market — Prefill (Dialog Yes Clone top-right)
 // @namespace    https://torn.city/
-// @version      2.7.3
-// @description  Right-aligned 25% "Fill Max" overlay on native Buy/Confirm. For the cheapest listing only, the confirm "Yes" button appears exactly behind the overlay spot. No confirm bypass; just UI positioning tweaks.
+// @version      2.9.1
+// @description  When Torn shows the confirm dialog, clone the native “Yes” button and pin it in the top-right corner (just left of the X). Clicking it forwards to the real Yes. Also keeps the row “Fill Max” overlay on Buy.
 // @author       Baz
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
@@ -15,31 +15,36 @@
   'use strict';
 
   GM_addStyle(`
-    .im-fill-overlay {
-      position:absolute;
-      display:flex; align-items:center; justify-content:center;
+    /* Row overlay: rightmost 25% of the native Buy */
+    .im-fill-overlay{
+      position:absolute; display:flex; align-items:center; justify-content:center;
       cursor:pointer; font-size:11px; font-weight:600;
-      z-index: 9;
-      background: rgba(22,163,74,.12);
-      color: #16a34a;
-      border-left: 1px solid #16a34a;
-      border-radius: 0 8px 8px 0;
+      z-index:9; background:rgba(22,163,74,.12); color:#16a34a;
+      border-left:1px solid #16a34a; border-radius:0 8px 8px 0;
       pointer-events:auto; user-select:none; -webkit-user-select:none;
     }
-    .im-fill-overlay:hover { background: rgba(22,163,74,.20) }
-    .im-fill-overlay.im-done { z-index:-1; pointer-events:none; background:transparent; border-color:transparent }
-    .im-flash { box-shadow: 0 0 0 3px rgba(0,160,255,.55)!important; transition:box-shadow .25s ease }
+    .im-fill-overlay:hover{ background:rgba(22,163,74,.20) }
+    .im-fill-overlay.im-done{ z-index:-1; pointer-events:none; background:transparent; border-color:transparent }
+    .im-flash{ box-shadow:0 0 0 3px rgba(0,160,255,.55)!important; transition:box-shadow .25s ease }
 
-    .im-relocated-confirm {
-      position: fixed !important;
-      z-index: 2147483647 !important;
-      margin: 0 !important;
-      display: flex !important;
-      align-items: center !important;
-      justify-content: center !important;
+    /* Cloned Yes button in dialog (top-right, left of X) */
+    .im-yes-clone {
+      position:absolute !important;
+      z-index:2147483646 !important;
+      padding:6px 10px !important;
+      border-radius:6px !important;
+      border:1px solid var(--tt-color-green, #16a34a) !important;
+      background:rgba(22,163,74,.12) !important;
+      color:#16a34a !important;
+      font-weight:600 !important;
+      cursor:pointer !important;
+      user-select:none !important;
+      display:flex; align-items:center; justify-content:center;
     }
+    .im-yes-clone:hover{ background:rgba(22,163,74,.20) !important; }
   `);
 
+  // ===== helpers =====
   const SEL = {
     list: 'ul[class*="sellerList"]',
     rowWrapper: 'li[class*="rowWrapper"]',
@@ -48,14 +53,42 @@
     qtyCell: 'div[class*="available"]',
     showBtn: 'button[class*="showBuyControlsButton"]',
     amountInputs: 'input:not([type="checkbox"]):not([type="hidden"])',
-    buyButtons: 'button, a',
+    buyButtons: 'button, a'
   };
 
+  const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
   const parseMoney = (s)=>{ s=String(s||'').replace(/[^\d.]/g,''); return s?Math.floor(Number(s)):NaN; };
   const toInt = (s)=>{ const m=String(s||'').match(/\d[\d,]*/); return m?Number(m[0].replace(/[^\d]/g,'')):NaN; };
-  const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
-  const rowWrap = (row)=>row.closest(SEL.rowWrapper) || row.closest('li') || document.body;
 
+  function getRows(){
+    const list=document.querySelector(SEL.list); if (!list) return [];
+    return Array.from(list.querySelectorAll(`${SEL.rowWrapper} > ${SEL.row}`)).filter(r=>r.offsetParent!==null);
+  }
+  function findNativeBuyButton(row){
+    const li=row.closest(SEL.rowWrapper) || row.closest('li') || document.body;
+    const btns=Array.from(li.querySelectorAll(SEL.buyButtons)).filter(b=>{
+      const t=(b.textContent||'').trim().toLowerCase();
+      if (!t) return false;
+      if (/show\s*buy/i.test(t)) return false;
+      return /buy|confirm|purchase/.test(t);
+    });
+    const visible=btns.find(b=>b.getBoundingClientRect().width>0 && b.getBoundingClientRect().height>0);
+    return visible || btns[0] || null;
+  }
+  async function ensureControlsOpen(row){
+    const show=row.querySelector(SEL.showBtn);
+    if (show) show.click();
+    for (let i=0;i<20;i++){ await sleep(20); if (findAmountInputForRow(row)) break; }
+  }
+  function findAmountInputForRow(row){
+    const li=row.closest(SEL.rowWrapper) || row.closest('li') || document.body;
+    const cands=Array.from(li.querySelectorAll(SEL.amountInputs)).filter(inp=>{
+      if (!(inp instanceof HTMLInputElement)) return false;
+      if (inp.type==='checkbox'||inp.type==='hidden'||inp.disabled) return false;
+      const r=inp.getBoundingClientRect(); return r.width>0 && r.height>0;
+    });
+    return cands[0] || null;
+  }
   function getWalletFromHeader(){
     const root=document.querySelector('#topRoot')||document.body;
     for (const n of root.querySelectorAll('span,div,a,li,b,strong')){
@@ -80,233 +113,145 @@
   }
   function flash(el){ el.classList.add('im-flash'); setTimeout(()=>el.classList.remove('im-flash'),280); }
 
-  function findAmountInputForRow(row){
-    const li=rowWrap(row);
-    const candidates=Array.from(li.querySelectorAll(SEL.amountInputs)).filter(inp=>{
-      if (!(inp instanceof HTMLInputElement)) return false;
-      if (inp.type==='checkbox'||inp.type==='hidden'||inp.disabled) return false;
-      const r=inp.getBoundingClientRect(); return r.width>0 && r.height>0;
-    });
-    return candidates[0] || null;
+  // ===== ROW: add “Fill Max” overlay on Buy =====
+  function positionOverlay(overlay, nativeBtn){
+    const parent=overlay.parentElement; if (!parent) return;
+    const pr=parent.getBoundingClientRect(), br=nativeBtn.getBoundingClientRect();
+    const ow=Math.max(24, Math.round(br.width*0.25));
+    overlay.style.top=`${br.top-pr.top}px`;
+    overlay.style.left=`${br.left-pr.left + (br.width-ow)}px`;
+    overlay.style.width=`${ow}px`;
+    overlay.style.height=`${br.height}px`;
+    overlay.style.borderRadius='0 8px 8px 0';
   }
 
-  function findNativeBuyButton(row){
-    const li=rowWrap(row);
-    const btns=Array.from(li.querySelectorAll(SEL.buyButtons)).filter(b=>{
-      const txt=(b.textContent||'').trim().toLowerCase();
-      if (!txt) return false;
-      if (/show\s*buy/i.test(txt)) return false;
-      return /buy|confirm|purchase/.test(txt);
-    });
-    const visible = btns.find(b=>b.getBoundingClientRect().width>0 && b.getBoundingClientRect().height>0);
-    return visible || btns[0] || null;
-  }
-
-  async function ensureControlsOpen(row){
-    const show=row.querySelector(SEL.showBtn);
-    if (show) show.click();
-    for (let i=0;i<20;i++){ await sleep(20); if (findAmountInputForRow(row)) break; }
-  }
-
-  function getRows(){
-    const list=document.querySelector(SEL.list); if (!list) return [];
-    return Array.from(list.querySelectorAll(`${SEL.rowWrapper} > ${SEL.row}`)).filter(r=>r.offsetParent!==null);
-  }
-  function getCheapestRow(rows){
-    let cheapest=null, price=Infinity;
-    for (const r of rows){
-      const p=parseMoney(r.querySelector(SEL.price)?.textContent);
-      if (Number.isFinite(p) && p<price){ price=p; cheapest=r; }
-    }
-    return cheapest;
-  }
-
-  function positionOverlayOverRightQuarter(overlay, nativeBtn){
-    const parent = overlay.parentElement;
-    if (!parent) return;
-    const parentRect = parent.getBoundingClientRect();
-    const btnRect    = nativeBtn.getBoundingClientRect();
-
-    const top  = btnRect.top  - parentRect.top;
-    const left = btnRect.left - parentRect.left;
-    const w    = btnRect.width;
-    const h    = btnRect.height;
-
-    const ow   = Math.max(24, Math.round(w * 0.25));
-    const ox   = left + (w - ow);
-
-    overlay.style.top    = `${top}px`;
-    overlay.style.left   = `${ox}px`;
-    overlay.style.width  = `${ow}px`;
-    overlay.style.height = `${h}px`;
-    overlay.style.borderRadius = '0 8px 8px 0';
-  }
-  function getViewportRect(el){
-    const r = el.getBoundingClientRect();
-    return {left:r.left, top:r.top, width:r.width, height:r.height};
-  }
-
-  // === Confirm relocation state (cheapest only) ===
-  let lastCheapestOverlayRect = null;
-  let lastCheapestClickAt = 0;
-  let relocateTimer = null;
-  const CLICK_WINDOW_MS = 6000;
-  const POLL_MS = 50;
-
-  function isFreshCheapestClick(){
-    return lastCheapestOverlayRect && (Date.now() - lastCheapestClickAt) < CLICK_WINDOW_MS;
-  }
-
-  // Broad matcher for “Yes/Buy/Confirm” buttons in Torn dialogs
-  function looksLikeConfirmButton(el){
-    if (!(el instanceof HTMLElement)) return false;
-    const t = (el.textContent || '').trim().toLowerCase();
-    const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-    const cls = el.className || '';
-
-    if (/(^|\b)(yes|ok|buy|confirm|purchase|proceed)(\b|!|\.|,)/i.test(t)) return true;
-    if (/(^|\b)(yes|ok|buy|confirm|purchase|proceed)(\b|!|\.|,)/i.test(aria)) return true;
-    if (/(btn-yes|confirm|primary|accept|buy)/i.test(cls)) return true;
-
-    // also allow data attributes some UIs use
-    for (const attr of ['data-action','data-test','data-testid']){
-      const v = (el.getAttribute(attr)||'').toLowerCase();
-      if (/(yes|ok|confirm|buy|purchase|proceed)/i.test(v)) return true;
-    }
-    return false;
-  }
-
-  function visible(el){
-    const s = getComputedStyle(el);
-    if (s.display === 'none' || s.visibility === 'hidden') return false;
-    const r = el.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
-  }
-
-  function pinToRect(el, r){
-    el.classList.add('im-relocated-confirm');
-    el.style.left   = `${r.left}px`;
-    el.style.top    = `${r.top}px`;
-    el.style.width  = `${r.width}px`;
-    el.style.height = `${r.height}px`;
-  }
-
-  function tickRelocator(){
-    if (!isFreshCheapestClick()) { stopRelocator(); return; }
-
-    const rect = lastCheapestOverlayRect;
-    // search broadly but bias dialogs/overlays
-    const nodes = document.querySelectorAll('button, a, [role="button"]');
-    for (const n of nodes){
-      if (!visible(n)) continue;
-      if (!looksLikeConfirmButton(n)) continue;
-
-      // prefer things in a modal-ish container or with high z-index
-      const s = getComputedStyle(n);
-      const z = parseInt(s.zIndex || '0', 10);
-      const inDialog = !!n.closest('[role="dialog"], [class*="modal"], [class*="dialog"], .ui-dialog, .popup');
-
-      if (z > 1000 || inDialog) {
-        pinToRect(n, rect);
-        // stop after successful pin (we’ll keep pinning on each tick to resist reflows)
-      }
-    }
-  }
-
-  function startRelocator(){
-    stopRelocator();
-    relocateTimer = setInterval(tickRelocator, POLL_MS);
-  }
-  function stopRelocator(){
-    if (relocateTimer) { clearInterval(relocateTimer); relocateTimer = null; }
-  }
-
-  // Extra: if DOM changes (modal mounts), run an immediate tick
-  const confirmMO = new MutationObserver(()=>{
-    if (isFreshCheapestClick()) tickRelocator();
-  });
-  confirmMO.observe(document.documentElement, {childList:true, subtree:true});
-
-  // === Overlay creation (anchor to Buy's parent) ===
-  async function placeOverlay(row, isCheapest){
-    let native=null;
-    const t0=performance.now();
-    while (!native && performance.now()-t0<3000){
-      native = findNativeBuyButton(row);
-      if (!native){ await ensureControlsOpen(row); await sleep(60); }
-    }
+  function placeRowOverlay(row){
+    const native=findNativeBuyButton(row);
     if (!native) return;
-
-    const container = native.parentElement || row;
-    if (getComputedStyle(container).position === 'static') container.style.position='relative';
+    const container=native.parentElement || row;
+    if (getComputedStyle(container).position==='static') container.style.position='relative';
     if (container.querySelector(':scope > .im-fill-overlay')) return;
 
     const overlay=document.createElement('div');
     overlay.className='im-fill-overlay';
-    overlay.setAttribute('role','button');
-    overlay.setAttribute('aria-label','Fill Max');
-    overlay.setAttribute('tabindex','-1');
     overlay.textContent='Fill Max';
+    positionOverlay(overlay, native);
 
-    positionOverlayOverRightQuarter(overlay, native);
-
-    const ro = new ResizeObserver(()=>positionOverlayOverRightQuarter(overlay, native));
+    const ro=new ResizeObserver(()=>positionOverlay(overlay, native));
     ro.observe(container); ro.observe(native);
-    const realign = ()=>positionOverlayOverRightQuarter(overlay, native);
-    window.addEventListener('scroll', realign, {passive:true});
-    const mo = new MutationObserver(()=>positionOverlayOverRightQuarter(overlay, native));
-    mo.observe(container, {attributes:true, childList:false, subtree:false});
+    window.addEventListener('scroll', ()=>positionOverlay(overlay, native), {passive:true});
 
-    overlay.addEventListener('mousedown', (e)=>{ e.preventDefault(); e.stopPropagation(); }, {capture:true});
+    overlay.addEventListener('mousedown',(e)=>{ e.preventDefault(); e.stopPropagation(); }, {capture:true});
     overlay.addEventListener('click', async (e)=>{
       e.preventDefault(); e.stopPropagation();
-
-      const unitPrice=parseMoney(row.querySelector(SEL.price)?.textContent);
-      const qtyText=row.querySelector(SEL.qtyCell)?.textContent;
-      const qty=toInt(qtyText);
+      const unit=parseMoney(row.querySelector(SEL.price)?.textContent);
+      const qty=toInt(row.querySelector(SEL.qtyCell)?.textContent);
       const wallet=getWalletFromHeader();
-      const afford=computeAfford(wallet,unitPrice,qty);
+      const afford=computeAfford(wallet, unit, qty);
 
+      await ensureControlsOpen(row);
       const input=findAmountInputForRow(row);
-      if (!input) return;
-
-      setInputValue(input, afford>0?afford:'');
-      if (afford<=0) input.placeholder='Insufficient funds';
-      flash(input);
-
-      if (isCheapest){
-        lastCheapestOverlayRect = getViewportRect(overlay);
-        lastCheapestClickAt = Date.now();
-        startRelocator();                         // begin polling
-        setTimeout(stopRelocator, CLICK_WINDOW_MS); // auto-clean
-        // immediate passes for already-open dialogs
-        setTimeout(tickRelocator, 50);
-        setTimeout(tickRelocator, 150);
-        setTimeout(tickRelocator, 300);
+      if (input){
+        setInputValue(input, afford>0?afford:'');
+        if (afford<=0) input.placeholder='Insufficient funds';
+        flash(input);
       }
-
       overlay.classList.add('im-done');
     }, {capture:true});
 
     container.appendChild(overlay);
   }
 
-  function refresh(){
-    const rows = getRows();
-    if (!rows.length) return;
-    const cheapest = getCheapestRow(rows);
-    for (const row of rows){
-      placeOverlay(row, row === cheapest);
-    }
+  function refreshRows(){
+    for (const row of getRows()) placeRowOverlay(row);
   }
 
+  // ===== DIALOG: clone “Yes” and pin top-right (left of X) =====
+  function isDialog(node){
+    if (!(node instanceof HTMLElement)) return false;
+    if (node.getAttribute('role')==='dialog') return true;
+    const cls=node.className||'';
+    return /\bmodal\b|\bdialog\b|confirmWrapper|ui-dialog|popup/i.test(cls);
+  }
+  function findDialog(){
+    // prefer deepest recent dialog
+    const candidates = Array.from(document.querySelectorAll('[role="dialog"], [class*="modal"], [class*="Dialog"], [class*="dialog"], .confirmWrapper, .ui-dialog, .popup'))
+      .filter(el=>el.getBoundingClientRect().width>0 && el.getBoundingClientRect().height>0);
+    return candidates.pop() || null;
+  }
+  function findCloseX(dialog){
+    // usual close buttons
+    return dialog.querySelector('button[aria-label="Close"], [class*="close"], .close, .ui-dialog-titlebar-close, [data-role="close"]');
+  }
+  function findYes(dialog){
+    const btns = dialog.querySelectorAll('button, a, [role="button"]');
+    for (const b of btns){
+      const t=(b.textContent||'').trim().toLowerCase();
+      if (/(^|\b)(yes|confirm|buy|purchase|ok|proceed)(\b|!|\.|,)/.test(t)) return b;
+    }
+    // fallback: match Torn class from your screenshot
+    const byClass = dialog.querySelector('button[class*="confirmButton"]');
+    return byClass || null;
+  }
+
+  function placeYesClone(dialog){
+    if (!dialog || dialog.querySelector('.im-yes-clone')) return;
+
+    const yes=findYes(dialog); if (!yes) return;
+
+    // Ensure dialog is positioning context
+    const cs=getComputedStyle(dialog);
+    if (cs.position==='static') dialog.style.position='relative';
+
+    const clone = yes.cloneNode(true);
+    clone.classList.add('im-yes-clone');
+    clone.textContent = (yes.textContent||'Yes').trim();
+
+    // Position: top-right, just left of the X
+    const pr = dialog.getBoundingClientRect();
+    const xBtn = findCloseX(dialog);
+    const xr  = xBtn ? xBtn.getBoundingClientRect() : {left: pr.right - 12, width: 12};
+    const topPad = 8, gap = 8, width = Math.max(70, yes.getBoundingClientRect().width);
+
+    clone.style.top = `${topPad}px`;
+    clone.style.right = `${Math.max(8, (pr.right - xr.left) + gap)}px`;
+    clone.style.width = `${width}px`;
+    // height will auto from padding; mirror original if needed:
+    const yh = yes.getBoundingClientRect().height;
+    if (yh > 0) clone.style.height = `${yh}px`;
+
+    // click forwards to real Yes
+    clone.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); yes.click(); }, {capture:true});
+
+    dialog.appendChild(clone);
+  }
+
+  // Observe for dialogs and keep the clone pinned if the dialog reflows
+  const dialogMO = new MutationObserver((muts)=>{
+    for (const m of muts){
+      const dlg = [...(m.addedNodes||[])].find(isDialog) || findDialog();
+      if (dlg) {
+        placeYesClone(dlg);
+        // re-pin on resize/scroll/layout
+        const ro = new ResizeObserver(()=>placeYesClone(dlg));
+        ro.observe(dlg);
+        window.addEventListener('scroll', ()=>placeYesClone(dlg), {passive:true});
+      }
+    }
+  });
+  dialogMO.observe(document.documentElement, {childList:true, subtree:true});
+
+  // Also sweep periodically (in case the dialog was already open)
+  setInterval(()=>{ const d=findDialog(); if (d) placeYesClone(d); }, 300);
+
+  // ===== bootstrap =====
   const docMO=new MutationObserver(()=>{
     if (docMO._raf) cancelAnimationFrame(docMO._raf);
-    docMO._raf=requestAnimationFrame(()=>setTimeout(refresh,30));
+    docMO._raf=requestAnimationFrame(()=>setTimeout(refreshRows,30));
   });
   docMO.observe(document.documentElement,{childList:true,subtree:true});
 
-  setTimeout(refresh,200);
-  setTimeout(refresh,800);
-  setInterval(refresh,2000);
+  setTimeout(refreshRows,200);
+  setTimeout(refreshRows,800);
+  setInterval(refreshRows,2000);
 })();
