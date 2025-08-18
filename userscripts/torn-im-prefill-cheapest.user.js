@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Item Market — Floating Fill Max + BUY + YES (Top Row) + Snap to Item Action
 // @namespace    https://torn.city/
-// @version      2.15.0
-// @description  Floating, draggable chips for TOP listing: FILL MAX, BUY, YES. Clicking an item grid's Action button snaps the chips over that button for quick access. Chips stack (front→back) and clicked chip moves to back. Positions persist; snap does not overwrite them. Alt+F/B/Y to trigger; Ctrl+Alt+F/B/Y to toggle visibility.
+// @version      2.15.1
+// @description  Floating, draggable chips for TOP listing: FILL MAX, BUY, YES. Clicking an item grid's Action button snaps the chips over that button (centered). Chips stack (front→back) and clicked chip moves to back. Positions persist; snap doesn’t overwrite them. Alt+F/B/Y to trigger; Ctrl+Alt+F/B/Y to toggle visibility.
 // @author       Baz
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
@@ -16,7 +16,7 @@
 
   GM_addStyle(`
     .im-chip{
-      position: fixed; z-index: 2147482000; /* base; real z set by stack */
+      position: fixed; z-index: 2147482000;
       padding: 12px 16px; min-width: 86px;
       border-radius: 12px; border: 2px solid var(--tt-color-green,#16a34a);
       background: rgba(22,163,74,.12); color:#16a34a;
@@ -46,7 +46,7 @@
     showBtn: 'button[class*="showBuyControlsButton"]',
     amountInputs: 'input:not([type="checkbox"]):not([type="hidden"])',
     buttons: 'button, a, [role="button"]',
-    itemActionBtn: 'button[class*="actionButton"]', // item grid action button
+    itemActionBtn: 'button[class*="actionButton"]',
   };
 
   const isVisible = el => !!el && el.getBoundingClientRect().width>0 && el.getBoundingClientRect().height>0 && getComputedStyle(el).visibility!=='hidden';
@@ -102,7 +102,6 @@
     input.blur();
   }
 
-  // TOP visible row
   function getTopRow(){
     const rows = getRows();
     let top = null, bestY = Infinity;
@@ -116,7 +115,6 @@
     return { row: top, unit, qty };
   }
 
-  // Find row's native BUY button
   function findNativeBuyButton(row){
     const wrap = getRowWrapper(row) || row;
     const btn = Array.from(wrap.querySelectorAll(SEL.buttons)).find(b=>{
@@ -126,7 +124,6 @@
     return btn || null;
   }
 
-  // Confirm dialog helpers (for YES)
   function findDialog(){
     const list = document.querySelectorAll('[role="dialog"], [class*="modal"], [class*="Dialog"], [class*="dialog"], .confirmWrapper, .ui-dialog, .popup, [class*="confirmWrapper"]');
     const vis = Array.from(list).filter(isVisible);
@@ -141,7 +138,6 @@
     return yes || null;
   }
 
-  // Floating chips
   const YES_POS_KEY='imYesFloatPos', YES_VIS_KEY='imYesFloatVisible';
   const FILL_POS_KEY='imFillFloatPos', FILL_VIS_KEY='imFillFloatVisible';
   const BUY_POS_KEY='imBuyFloatPos',  BUY_VIS_KEY='imBuyFloatVisible';
@@ -185,7 +181,7 @@
     let btn=document.querySelector(`.${className}`);
     if (!btn){
       btn=document.createElement('button');
-      btn.dataset.imChipId = id; // 'fill' | 'buy' | 'yes'
+      btn.dataset.imChipId = id;
       btn.className=`im-chip ${className}`;
       btn.textContent=text;
       document.body.appendChild(btn);
@@ -193,7 +189,7 @@
       btn.addEventListener('click', (e)=>{
         e.preventDefault(); e.stopPropagation();
         onClick?.();
-        rotateStackToBack(id); // clicked chip goes behind the other two
+        rotateStackToBack(id);
       }, {capture:true});
       const pos=loadPos(posKey, defaultPos);
       btn.style.left=pos.left+'px'; btn.style.top=pos.top+'px';
@@ -297,36 +293,44 @@
     writeStack(stack);
   }
 
-  // ----- Snap chips to clicked item Action button -----
+  // ----- Snap chips to clicked item Action button (precise center + fan by stack) -----
   function snapChipsToRect(rect){
-    // center chips horizontally on the button; fan vertically by +0/+14/+28px
-    const chips = [
-      document.querySelector('.im-fill-chip'),
-      document.querySelector('.im-buy-chip'),
-      document.querySelector('.im-yes'),
-    ];
-    const offsetsY = [0, 14, 28]; // small fan so they’re all clickable
-    chips.forEach((chip, idx)=>{
+    // front is EXACT center; mid and back are nudged down slightly
+    const stack = readStack();                // e.g., ['fill','buy','yes'] front→back
+    const orderToEl = {
+      fill: document.querySelector('.im-fill-chip'),
+      buy:  document.querySelector('.im-buy-chip'),
+      yes:  document.querySelector('.im-yes'),
+    };
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top  + rect.height / 2;
+
+    const offsetsY = [0, 10, 20];             // gentle fan so all remain clickable
+    stack.forEach((id, idx)=>{
+      const chip = orderToEl[id];
       if (!chip) return;
+
+      // Ensure we measure after layout
       const w = chip.offsetWidth || 100;
       const h = chip.offsetHeight || 36;
-      const left = Math.max(4, Math.min(window.innerWidth - w - 4, rect.left + rect.width/2 - w/2));
-      const top  = Math.max(4, Math.min(window.innerHeight - h - 4, rect.top  + offsetsY[idx]));
+
+      const left = clamp(centerX - w/2, 4, window.innerWidth - w - 4);
+      const top  = clamp(centerY - h/2 + offsetsY[idx], 4, window.innerHeight - h - 4);
+
       chip.style.left = left + 'px';
       chip.style.top  = top  + 'px';
-      // Do NOT write to localStorage here — this is a temporary snap
     });
   }
 
-  // Listen for clicks on the item grid "Action" buttons
   document.addEventListener('click', (e)=>{
     const btn = e.target.closest(SEL.itemActionBtn);
     if (!btn) return;
     const r = btn.getBoundingClientRect();
-    snapChipsToRect(r);
+    // Wait 1 frame to ensure chips have been created/measured
+    requestAnimationFrame(()=>snapChipsToRect(r));
   }, true);
 
-  // Keep YES active visual when dialog present
+  // YES active highlight
   function updateYesActive(){
     const btn=ensureYesChip();
     const dlg=findDialog();
@@ -335,20 +339,15 @@
 
   // Hotkeys
   window.addEventListener('keydown',(e)=>{
-    // YES
     if (e.altKey && !e.ctrlKey && e.code==='KeyY'){ const b=ensureYesChip(); if(!b.classList.contains('hidden')) b.click(); }
     if (e.altKey && e.ctrlKey && e.code==='KeyY'){ const b=ensureYesChip(); b.classList.toggle('hidden'); localStorage.setItem(YES_VIS_KEY, b.classList.contains('hidden')?'hidden':'visible'); }
-    // FILL
+
     if (e.altKey && !e.ctrlKey && e.code==='KeyF'){ const b=ensureFillChip(); if(!b.classList.contains('hidden')) b.click(); }
     if (e.altKey && e.ctrlKey && e.code==='KeyF'){ const b=ensureFillChip(); b.classList.toggle('hidden'); localStorage.setItem(FILL_VIS_KEY, b.classList.contains('hidden')?'hidden':'visible'); }
-    // BUY
+
     if (e.altKey && !e.ctrlKey && e.code==='KeyB'){ const b=ensureBuyChip(); if(!b.classList.contains('hidden')) b.click(); }
     if (e.altKey && e.ctrlKey && e.code==='KeyB'){ const b=ensureBuyChip(); b.classList.toggle('hidden'); localStorage.setItem(BUY_VIS_KEY, b.classList.contains('hidden')?'hidden':'visible'); }
   }, true);
-
-  // Observer for YES active state
-  const dialogMO=new MutationObserver(()=>updateYesActive());
-  dialogMO.observe(document.documentElement,{childList:true,subtree:true});
 
   // Bootstrap
   ensureFillChip();
@@ -356,4 +355,7 @@
   ensureYesChip();
   applyStack(readStack());
   updateYesActive();
+
+  const dialogMO=new MutationObserver(()=>updateYesActive());
+  dialogMO.observe(document.documentElement,{childList:true,subtree:true});
 })();
