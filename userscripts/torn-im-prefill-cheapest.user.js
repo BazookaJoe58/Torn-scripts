@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Item Market — Prefill (Dialog MADE Yes top-right)
+// @name         Torn Item Market — Prefill (Fill Max + Dialog Yes Clone w/ Fallback)
 // @namespace    https://torn.city/
-// @version      2.9.6
-// @description  Restored stable build: Row Fill Max overlay (right 25%) + confirm dialog cloned “Yes” (top-right, just left of X). Adds light safety guards (debounce + try/catch). No layout changes, no heavy debug.
+// @version      2.9.7
+// @description  Row: rightmost 25% "Fill Max" overlay that fills max affordable into the qty input. Dialog: clone Yes in the dialog top-right; ALSO show a viewport-fixed YES fallback (bottom-right) so it's always reachable. No confirm bypass; only UI helpers.
 // @author       Baz
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
@@ -14,8 +14,9 @@
 (function () {
   'use strict';
 
-  // ---------- Styles (unchanged) ----------
+  // ---------- Styles ----------
   GM_addStyle(`
+    /* Fill Max overlay (rightmost 25% of native Buy) */
     .im-fill-overlay{
       position:absolute; display:flex; align-items:center; justify-content:center;
       cursor:pointer; font-size:11px; font-weight:600;
@@ -27,6 +28,7 @@
     .im-fill-overlay.im-done{ z-index:-1; pointer-events:none; background:transparent; border-color:transparent }
     .im-flash{ box-shadow:0 0 0 3px rgba(0,160,255,.55)!important; transition:box-shadow .25s ease }
 
+    /* In-dialog Yes clone (top-right, left of X) */
     .im-yes-made {
       position:absolute !important;
       z-index:2147483646 !important;
@@ -42,9 +44,25 @@
       line-height:1 !important;
     }
     .im-yes-made:hover{ background:rgba(22,163,74,.20) !important; }
+
+    /* Viewport-fixed fallback YES (always visible) */
+    .im-yes-fallback {
+      position: fixed !important;
+      right: 24px; bottom: 18%;
+      z-index: 2147483647 !important;
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 2px solid var(--tt-color-green, #16a34a);
+      background: rgba(22,163,74,.12);
+      color: #16a34a; font-weight: 800; letter-spacing: .3px;
+      box-shadow: 0 8px 30px rgba(0,0,0,.35);
+      cursor: pointer; user-select: none;
+    }
+    .im-yes-fallback:hover{ background: rgba(22,163,74,.20); }
+    .im-yes-fallback.hidden{ display:none !important; }
   `);
 
-  // ---------- Selectors & utils (unchanged) ----------
+  // ---------- Utils ----------
   const SEL = {
     list: 'ul[class*="sellerList"]',
     rowWrapper: 'li[class*="rowWrapper"]',
@@ -58,19 +76,12 @@
   const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
   const parseMoney = (s)=>{ s=String(s||'').replace(/[^\d.]/g,''); return s?Math.floor(Number(s)):NaN; };
   const toInt = (s)=>{ const m=String(s||'').match(/\d[\d,]*/); return m?Number(m[0].replace(/[^\d]/g,'')):NaN; };
-  function rafDebounce(fn, delay=30){
-    let af=null, t=null;
-    return function(...args){
-      if (af) cancelAnimationFrame(af);
-      if (t) clearTimeout(t);
-      af = requestAnimationFrame(()=>fn.apply(this,args));
-      t = setTimeout(()=>{ if (af) cancelAnimationFrame(af); fn.apply(this,args); }, delay);
-    };
-  }
-  const safe = (fn)=>(...a)=>{ try { return fn(...a); } catch(e){ console.debug('IM safe error:', e); } };
+  const flash = (el)=>{ if(!el) return; el.classList.add('im-flash'); setTimeout(()=>el.classList.remove('im-flash'),280); };
+  const safe = (fn)=>(...a)=>{ try { return fn(...a); } catch(e){ /* swallow */ } };
 
+  // ---------- Row helpers ----------
   function getRows(){
-    const list = document.querySelector(SEL.list); if (!list) return [];
+    const list=document.querySelector(SEL.list); if (!list) return [];
     return Array.from(list.querySelectorAll(`${SEL.rowWrapper} > ${SEL.row}`)).filter(r=>r.offsetParent!==null);
   }
   function findNativeBuyButton(row){
@@ -120,9 +131,8 @@
     input.dispatchEvent(new Event('change',{bubbles:true}));
     input.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true, key:'0'}));
   }
-  function flash(el){ if(!el) return; el.classList.add('im-flash'); setTimeout(()=>el.classList.remove('im-flash'),280); }
 
-  // ---------- Row overlay (unchanged behavior) ----------
+  // ---------- Fill Max overlay ----------
   function positionOverlay(overlay, nativeBtn){
     const parent=overlay.parentElement; if (!parent) return;
     const pr=parent.getBoundingClientRect(), br=nativeBtn.getBoundingClientRect();
@@ -137,7 +147,6 @@
     const native=findNativeBuyButton(row);
     if (!native) return;
     const container=native.parentElement || row;
-    if (!container) return;
     if (getComputedStyle(container).position==='static') container.style.position='relative';
     if (container.querySelector(':scope > .im-fill-overlay')) return;
 
@@ -148,7 +157,7 @@
 
     const ro=new ResizeObserver(()=>positionOverlay(overlay, native));
     ro.observe(container); ro.observe(native);
-    window.addEventListener('scroll', rafDebounce(()=>positionOverlay(overlay, native), 60), {passive:true});
+    window.addEventListener('scroll', ()=>positionOverlay(overlay, native), {passive:true});
 
     overlay.addEventListener('mousedown',(e)=>{ e.preventDefault(); e.stopPropagation(); }, {capture:true});
     overlay.addEventListener('click', safe(async (e)=>{
@@ -174,7 +183,7 @@
     for (const row of getRows()) placeRowOverlay(row);
   });
 
-  // ---------- Confirm dialog helpers (unchanged visuals) ----------
+  // ---------- Confirm dialog Yes clone + fallback ----------
   function findDialog(){
     const list = document.querySelectorAll(
       '[role="dialog"], [class*="modal"], [class*="Dialog"], [class*="dialog"], .confirmWrapper, .ui-dialog, .popup'
@@ -185,22 +194,22 @@
     return vis.pop() || null;
   }
   function findCloseX(dialog){
-    return dialog.querySelector('button[aria-label="Close"], [class*="close"], .close, .ui-dialog-titlebar-close, [data-role="close"]');
+    return dialog?.querySelector('button[aria-label="Close"], [class*="close"], .close, .ui-dialog-titlebar-close, [data-role="close"]');
   }
   function findNativeYes(dialog){
-    const btns = dialog.querySelectorAll('button, a, [role="button"]');
+    const scope = dialog || document;
+    const btns = scope.querySelectorAll('button, a, [role="button"]');
     for (const b of btns){
       const t=(b.textContent||'').trim().toLowerCase();
-      if (/(^|\b)(yes|confirm|buy|purchase|ok|proceed)(\b|!|\.|,)/.test(t)) return b;
+      if (/(^|\b)(yes|confirm|buy|purchase|ok|proceed|agree)(\b|!|\.|,)/.test(t)) return b;
     }
-    const byClass = dialog.querySelector('button[class*="confirmButton"]');
-    return byClass || null;
+    return scope.querySelector('button[class*="confirm"], a[class*="confirm"], button[class*="primary"]');
   }
+
+  // In-dialog clone (top-right)
   const makeYesTopRight = safe(function(dialog){
     if (!dialog || dialog.querySelector('.im-yes-made')) return;
-
-    const yes=findNativeYes(dialog);
-    if (!yes) return;
+    const yes=findNativeYes(dialog); if (!yes) return;
 
     const cs=getComputedStyle(dialog);
     if (cs.position==='static') dialog.style.position='relative';
@@ -213,47 +222,79 @@
     const pr = dialog.getBoundingClientRect();
     const xBtn = findCloseX(dialog);
     const xr  = xBtn ? xBtn.getBoundingClientRect() : {left: pr.right - 12, width: 12};
-    const topPad = 8, gap = 8, width = Math.max(70, yes.getBoundingClientRect().width);
+    const topPad = 8, gap = 8, width = Math.max(70, yes.getBoundingClientRect().width||90);
 
     made.style.top = `${topPad}px`;
-    const rightPx = Math.max(8, (pr.right - xr.left) + gap);
-    made.style.right = `${rightPx}px`;
+    made.style.right = `${Math.max(8, (pr.right - xr.left) + gap)}px`;
     made.style.width = `${width}px`;
     const yh = yes.getBoundingClientRect().height;
     if (yh>0) made.style.height = `${yh}px`;
 
-    made.addEventListener('click', (e)=>{
-      e.preventDefault(); e.stopPropagation(); yes.click();
-    }, {capture:true});
-
+    made.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); yes.click(); }, {capture:true});
     dialog.appendChild(made);
-
-    const pos = rafDebounce(()=>{
-      const pr2 = dialog.getBoundingClientRect();
-      const xr2 = (findCloseX(dialog)?.getBoundingClientRect()) || {left: pr2.right - 12, width: 12};
-      const rightPx2 = Math.max(8, (pr2.right - xr2.left) + gap);
-      made.style.right = `${rightPx2}px`;
-    }, 60);
-    const ro = new ResizeObserver(pos);
-    ro.observe(dialog);
-    window.addEventListener('scroll', pos, {passive:true});
   });
 
-  // ---------- Observers (debounced & guarded) ----------
-  const onDomChangeRows = rafDebounce(refreshRows, 60);
-  const rowsMO = new MutationObserver(()=>onDomChangeRows());
+  // Viewport-fixed fallback button (always visible)
+  function ensureFallbackYes(){
+    let fb = document.querySelector('.im-yes-fallback');
+    if (!fb){
+      fb = document.createElement('button');
+      fb.className = 'im-yes-fallback hidden';
+      fb.textContent = 'YES';
+      fb.addEventListener('click', (e)=>{
+        e.preventDefault(); e.stopPropagation();
+        const dlg = findDialog();
+        const yes = findNativeYes(dlg || document);
+        if (yes) yes.click();
+      }, {capture:true});
+      document.body.appendChild(fb);
+    }
+    return fb;
+  }
+  function showFallbackIfNeeded(){
+    const dlg = findDialog();
+    const yes = findNativeYes(dlg || document);
+    const fb = ensureFallbackYes();
+
+    // If a dialog is visible AND we can find a native Yes, show fallback to guarantee access.
+    if (dlg && yes){
+      fb.classList.remove('hidden');
+    } else {
+      fb.classList.add('hidden');
+    }
+  }
+
+  // ---------- Observers ----------
+  const rowsMO = new MutationObserver(()=>refreshRows());
   rowsMO.observe(document.documentElement, {childList:true, subtree:true});
 
-  const onDialogSweep = rafDebounce(()=>{
+  const dialogMO = new MutationObserver(()=>{
     const dlg = findDialog();
     if (dlg) makeYesTopRight(dlg);
-  }, 60);
-  const dialogMO = new MutationObserver(()=>onDialogSweep());
+    showFallbackIfNeeded();
+  });
   dialogMO.observe(document.documentElement, {childList:true, subtree:true});
 
-  // periodic light sweeps (unchanged cadence)
+  // Also hook Buy/Confirm clicks — poll a moment while dialog mounts
+  document.addEventListener('click', (ev)=>{
+    const t = ev.target;
+    if (!t) return;
+    const txt = (t.textContent || '').toLowerCase();
+    if (!/(^|\b)(buy|purchase|confirm)(\b|!|\.|,)/.test(txt)) return;
+
+    let tries = 0;
+    const iv = setInterval(()=>{
+      tries++;
+      const dlg = findDialog();
+      if (dlg) makeYesTopRight(dlg);
+      showFallbackIfNeeded();
+      if ((dlg && dlg.querySelector('.im-yes-made')) || tries>60) clearInterval(iv);
+    }, 50);
+  }, true);
+
+  // ---------- Bootstrap ----------
   setTimeout(refreshRows,200);
   setTimeout(refreshRows,800);
   setInterval(refreshRows,2000);
-  setInterval(()=>{ const dlg=findDialog(); if (dlg) makeYesTopRight(dlg); }, 300);
+  setInterval(()=>{ const dlg=findDialog(); if (dlg) makeYesTopRight(dlg); showFallbackIfNeeded(); }, 400);
 })();
