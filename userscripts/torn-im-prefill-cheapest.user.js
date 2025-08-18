@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Item Market — Floating Fill Max + BUY + YES (Top Row) + Snap to Item Action
 // @namespace    https://torn.city/
-// @version      2.15.2
-// @description  Floating, draggable chips for TOP listing: FILL MAX (max you can AFFORD), BUY, YES. Clicking an item grid's Action button snaps the chips over that button (centered). Chips stack (front→back) and clicked chip moves to back. Positions persist; snap doesn’t overwrite them. Hotkeys: Alt+F/B/Y to trigger (Ctrl+Alt+F/B/Y toggle visibility).
+// @version      2.16.0
+// @description  Floating, draggable chips for TOP listing: FILL MAX (max you can AFFORD), BUY, YES. Clicking an item grid's Action button snaps the chips over that button (centered). Chips stack (front→back) and clicked chip moves to back. Positions persist; snap doesn’t overwrite them. Hotkeys: Alt+F/B/Y (Ctrl+Alt+F/B/Y toggle visibility).
 // @author       Baz
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
@@ -61,22 +61,55 @@
   }
   function getRowWrapper(el){ return el?.closest(SEL.rowWrapper) || el?.closest('li') || null; }
 
-  // More robust wallet parser (tries multiple UI places)
-  function getWalletFromHeader(){
-    // Left sidebar "Money:" line
-    const moneyLabel = Array.from(document.querySelectorAll('*'))
-      .find(n => /money:?/i.test(n.textContent || '') && n.nextElementSibling && /\$/.test(n.nextElementSibling.textContent||''));
-    if (moneyLabel){
-      const v = parseMoney(moneyLabel.nextElementSibling.textContent);
-      if (Number.isFinite(v)) return v;
-    }
-    // Any $… text near top bar
-    const root=document.querySelector('#topRoot')||document.body;
-    for (const n of root.querySelectorAll('span,div,a,li,b,strong')){
-      const t=n.textContent||'';
-      if (/\$\s?[\d,. ]+/.test(t)){ const v=parseMoney(t); if (Number.isFinite(v) && v>=0) return v; }
+  // ---------- ROBUST WALLET (sidebar "Money: $...") ----------
+  function getWalletFromSidebarText() {
+    // Find elements whose text contains "Money:" and a dollar amount on the same line
+    const nodes = Array.from(document.querySelectorAll('div,li,span,p,a,strong,b'));
+    for (const n of nodes) {
+      const t = (n.textContent || '').replace(/\s+/g, ' ').trim();
+      const m = t.match(/(^|\b)Money:\s*\$([\d,]+)/i);
+      if (m) {
+        const v = Number(m[2].replace(/[^\d]/g, ''));
+        if (Number.isFinite(v)) return v;
+      }
     }
     return NaN;
+  }
+  function getWalletFromLabeledRow() {
+    // Look for a label node that is exactly "Money:" with a sibling containing the dollar amount
+    const labels = Array.from(document.querySelectorAll('*')).filter(n => (n.childNodes && Array.from(n.childNodes).some(c => c.nodeType===3 && /^Money:\s*$/i.test(c.textContent||''))));
+    for (const lab of labels) {
+      const sibs = [lab.nextElementSibling, lab.parentElement, lab];
+      for (const s of sibs) {
+        if (!s) continue;
+        const m = (s.textContent||'').match(/\$\s*([\d,]+)/);
+        if (m) {
+          const v = Number(m[1].replace(/[^\d]/g,''));
+          if (Number.isFinite(v)) return v;
+        }
+      }
+    }
+    return NaN;
+  }
+  function getWalletFromHeaderLoose() {
+    // Tight fallback near the top area, but ignore tiny dollar amounts like $0 or $+X%
+    const root=document.querySelector('#topRoot')||document.body;
+    for (const n of root.querySelectorAll('span,div,a,li,b,strong')){
+      const t=(n.textContent||'').trim();
+      const m=t.match(/\$\s*([\d,]{2,})\b/); // need at least 2 digits to avoid $0 badges
+      if (m){
+        const v=Number(m[1].replace(/[^\d]/g,''));
+        if (Number.isFinite(v) && v>=0) return v;
+      }
+    }
+    return NaN;
+  }
+  function getWallet(){
+    // Try strict → looser fallbacks
+    let v = getWalletFromSidebarText();
+    if (!Number.isFinite(v)) v = getWalletFromLabeledRow();
+    if (!Number.isFinite(v)) v = getWalletFromHeaderLoose();
+    return v;
   }
 
   function computeAfford(wallet, unitPrice, qty){
@@ -112,7 +145,6 @@
     input.blur();
   }
 
-  // TOP visible row
   function getTopRow(){
     const rows = getRows();
     let top = null, bestY = Infinity;
@@ -126,7 +158,6 @@
     return { row: top, unit, qty };
   }
 
-  // Find row's native BUY button
   function findNativeBuyButton(row){
     const wrap = getRowWrapper(row) || row;
     const btn = Array.from(wrap.querySelectorAll(SEL.buttons)).find(b=>{
@@ -136,7 +167,6 @@
     return btn || null;
   }
 
-  // Confirm dialog helpers (for YES)
   function findDialog(){
     const list = document.querySelectorAll('[role="dialog"], [class*="modal"], [class*="Dialog"], [class*="dialog"], .confirmWrapper, .ui-dialog, .popup, [class*="confirmWrapper"]');
     const vis = Array.from(list).filter(isVisible);
@@ -151,11 +181,10 @@
     return yes || null;
   }
 
-  // Floating chips
   const YES_POS_KEY='imYesFloatPos', YES_VIS_KEY='imYesFloatVisible';
   const FILL_POS_KEY='imFillFloatPos', FILL_VIS_KEY='imFillFloatVisible';
   const BUY_POS_KEY='imBuyFloatPos',  BUY_VIS_KEY='imBuyFloatVisible';
-  const STACK_KEY='imChipsStack'; // ['fill','buy','yes'] front→back
+  const STACK_KEY='imChipsStack';
 
   function loadPos(key, def){
     try{ const p = JSON.parse(localStorage.getItem(key)||''); if (p && Number.isFinite(p.left) && Number.isFinite(p.top)) return p; }catch{}
@@ -236,9 +265,8 @@
         if (!row || !Number.isFinite(unit)) return;
 
         const wrap   = getRowWrapper(row);
-        const wallet = getWalletFromHeader();
+        const wallet = getWallet();
 
-        // **** Max YOU CAN AFFORD (wallet/unit price), clamped to listing qty ****
         const afford = computeAfford(wallet, unit, qty);
 
         await ensureControlsOpen(row);
@@ -248,7 +276,8 @@
         setInputValue(input, afford>0?afford:'');
         if (afford<=0) input.placeholder='Insufficient funds';
 
-        input.style.boxShadow='0 0 0 3px rgba(14,165,233,.55)'; setTimeout(()=>{ input.style.boxShadow=''; }, 260);
+        input.style.boxShadow='0 0 0 3px rgba(14,165,233,.55)';
+        setTimeout(()=>{ input.style.boxShadow=''; }, 260);
         wrap?.scrollIntoView({behavior:'smooth', block:'center'});
       }
     });
@@ -313,9 +342,9 @@
     writeStack(stack);
   }
 
-  // ----- Snap chips to clicked item Action button (precise center + fan by stack) -----
+  // ----- Snap chips to clicked item Action button -----
   function snapChipsToRect(rect){
-    const stack = readStack();                // e.g., ['fill','buy','yes'] front→back
+    const stack = readStack();
     const orderToEl = {
       fill: document.querySelector('.im-fill-chip'),
       buy:  document.querySelector('.im-buy-chip'),
@@ -323,7 +352,7 @@
     };
     const centerX = rect.left + rect.width / 2;
     const centerY = rect.top  + rect.height / 2;
-    const offsetsY = [0, 10, 20];             // gentle fan
+    const offsetsY = [0, 10, 20];
 
     stack.forEach((id, idx)=>{
       const chip = orderToEl[id];
