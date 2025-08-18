@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Item Market — Floating Fill Max (Top Row) + Floating BUY + Floating YES (Stacked)
+// @name         Torn Item Market — Floating Fill Max + BUY + YES (Top Row) + Snap to Item Action
 // @namespace    https://torn.city/
-// @version      2.14.0
-// @description  Floating, draggable chips: FILL MAX pre-fills TOP listing with max affordable qty; BUY clicks TOP listing's native Buy; YES forwards to Torn’s native confirm. Chips are stacked (front→back) and the clicked chip moves to the back. Positions & stack persist. Hotkeys: Alt+F / Alt+B / Alt+Y (Ctrl+Alt+* toggles visibility).
+// @version      2.15.0
+// @description  Floating, draggable chips for TOP listing: FILL MAX, BUY, YES. Clicking an item grid's Action button snaps the chips over that button for quick access. Chips stack (front→back) and clicked chip moves to back. Positions persist; snap does not overwrite them. Alt+F/B/Y to trigger; Ctrl+Alt+F/B/Y to toggle visibility.
 // @author       Baz
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
@@ -16,7 +16,7 @@
 
   GM_addStyle(`
     .im-chip{
-      position: fixed; z-index: 2147482000; /* base; real z is set dynamically */
+      position: fixed; z-index: 2147482000; /* base; real z set by stack */
       padding: 12px 16px; min-width: 86px;
       border-radius: 12px; border: 2px solid var(--tt-color-green,#16a34a);
       background: rgba(22,163,74,.12); color:#16a34a;
@@ -33,7 +33,7 @@
     .im-chip-fill{ border-color:#0ea5e9; color:#0ea5e9; background:rgba(14,165,233,.12); }
     .im-chip-fill:hover{ background:rgba(14,165,233,.20); }
 
-    .im-chip-buy{ border-color:#f59e0b; color:#f59e0b; background:rgba(245,158,11,.12);}
+    .im-chip-buy{ border-color:#f59e0b; color:#f59e0b; background:rgba(245,158,11,.12); }
     .im-chip-buy:hover{ background:rgba(245,158,11,.20); }
   `);
 
@@ -46,6 +46,7 @@
     showBtn: 'button[class*="showBuyControlsButton"]',
     amountInputs: 'input:not([type="checkbox"]):not([type="hidden"])',
     buttons: 'button, a, [role="button"]',
+    itemActionBtn: 'button[class*="actionButton"]', // item grid action button
   };
 
   const isVisible = el => !!el && el.getBoundingClientRect().width>0 && el.getBoundingClientRect().height>0 && getComputedStyle(el).visibility!=='hidden';
@@ -144,7 +145,7 @@
   const YES_POS_KEY='imYesFloatPos', YES_VIS_KEY='imYesFloatVisible';
   const FILL_POS_KEY='imFillFloatPos', FILL_VIS_KEY='imFillFloatVisible';
   const BUY_POS_KEY='imBuyFloatPos',  BUY_VIS_KEY='imBuyFloatVisible';
-  const STACK_KEY='imChipsStack'; // ['fill','buy','yes'] from front→back
+  const STACK_KEY='imChipsStack'; // ['fill','buy','yes'] front→back
 
   function loadPos(key, def){
     try{ const p = JSON.parse(localStorage.getItem(key)||''); if (p && Number.isFinite(p.left) && Number.isFinite(p.top)) return p; }catch{}
@@ -192,8 +193,7 @@
       btn.addEventListener('click', (e)=>{
         e.preventDefault(); e.stopPropagation();
         onClick?.();
-        // Move this chip to the BACK of the stack after action
-        rotateStackToBack(id);
+        rotateStackToBack(id); // clicked chip goes behind the other two
       }, {capture:true});
       const pos=loadPos(posKey, defaultPos);
       btn.style.left=pos.left+'px'; btn.style.top=pos.top+'px';
@@ -213,7 +213,6 @@
       onClick:()=>{ const dlg=findDialog(); const yes=findNativeYes(dlg||document); if (yes) yes.click(); }
     });
   }
-
   function ensureFillChip(){
     return makeChip({
       id:'fill',
@@ -238,7 +237,6 @@
       }
     });
   }
-
   function ensureBuyChip(){
     return makeChip({
       id:'buy',
@@ -279,14 +277,12 @@
     applyStack(stack);
   }
   function applyStack(stack){
-    // assign highest z-index to FRONT, then -1, -2
     const base = 2147483600;
     const map = {
       fill: document.querySelector('.im-fill-chip'),
       buy:  document.querySelector('.im-buy-chip'),
       yes:  document.querySelector('.im-yes'),
     };
-    // front→back
     const [front, mid, back] = stack;
     if (map[front]) map[front].style.zIndex = base;
     if (map[mid])   map[mid].style.zIndex   = base - 1;
@@ -296,11 +292,39 @@
     const stack = readStack();
     const i = stack.indexOf(id);
     if (i === -1) return;
-    // Move clicked id to the end (back), keeping relative order of others
     stack.splice(i,1);
     stack.push(id);
     writeStack(stack);
   }
+
+  // ----- Snap chips to clicked item Action button -----
+  function snapChipsToRect(rect){
+    // center chips horizontally on the button; fan vertically by +0/+14/+28px
+    const chips = [
+      document.querySelector('.im-fill-chip'),
+      document.querySelector('.im-buy-chip'),
+      document.querySelector('.im-yes'),
+    ];
+    const offsetsY = [0, 14, 28]; // small fan so they’re all clickable
+    chips.forEach((chip, idx)=>{
+      if (!chip) return;
+      const w = chip.offsetWidth || 100;
+      const h = chip.offsetHeight || 36;
+      const left = Math.max(4, Math.min(window.innerWidth - w - 4, rect.left + rect.width/2 - w/2));
+      const top  = Math.max(4, Math.min(window.innerHeight - h - 4, rect.top  + offsetsY[idx]));
+      chip.style.left = left + 'px';
+      chip.style.top  = top  + 'px';
+      // Do NOT write to localStorage here — this is a temporary snap
+    });
+  }
+
+  // Listen for clicks on the item grid "Action" buttons
+  document.addEventListener('click', (e)=>{
+    const btn = e.target.closest(SEL.itemActionBtn);
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    snapChipsToRect(r);
+  }, true);
 
   // Keep YES active visual when dialog present
   function updateYesActive(){
@@ -330,6 +354,6 @@
   ensureFillChip();
   ensureBuyChip();
   ensureYesChip();
-  applyStack(readStack());          // set initial front→back: fill, buy, yes
+  applyStack(readStack());
   updateYesActive();
 })();
