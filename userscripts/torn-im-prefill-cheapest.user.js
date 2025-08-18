@@ -93,7 +93,7 @@
     const root=document.querySelector('#topRoot')||document.body;
     for (const n of root.querySelectorAll('span,div,a,li,b,strong')){
       const t=n.textContent||'';
-      if (/\$\s?[\d,. ]+/.test(t)){ const v=parseMoney(t); if (Number.isFinite(v)) return v; }
+      if (/\$\s?[\d,. ]+/.test(t)){ const v=parseMoney(t); if (Number.isFinite(v) && v>=0) return v; }
     }
     return NaN;
   }
@@ -146,14 +146,15 @@
       const unit=parseMoney(row.querySelector(SEL.price)?.textContent);
       const qty=toInt(row.querySelector(SEL.qtyCell)?.textContent);
       const wallet=getWalletFromHeader();
-      const afford=computeAfford(wallet,unit,qty);
+      const afford=computeAfford(wallet, unit, qty);
 
       await ensureControlsOpen(row);
       const input=findAmountInputForRow(row);
-      if (input) setInputValue(input, afford>0?afford:'');
-      if (afford<=0 && input){ input.placeholder='Insufficient funds'; }
-      flash(input || overlay);
-
+      if (input){
+        setInputValue(input, afford>0?afford:'');
+        if (afford<=0) input.placeholder='Insufficient funds';
+        flash(input);
+      }
       overlay.classList.add('im-done');
     }, {capture:true});
 
@@ -165,6 +166,7 @@
 
   // --- confirm dialog helpers ---
   function findDialog(){
+    // Torn confirm shells typically match one of these
     const list = document.querySelectorAll(
       '[role="dialog"], [class*="modal"], [class*="Dialog"], [class*="dialog"], .confirmWrapper, .ui-dialog, .popup'
     );
@@ -177,12 +179,14 @@
     return dialog.querySelector('button[aria-label="Close"], [class*="close"], .close, .ui-dialog-titlebar-close, [data-role="close"]');
   }
   function findNativeYes(dialog){
+    // prefer buttons in container like .confirmButtons__*
     const btns = dialog.querySelectorAll('button, a, [role="button"]');
     for (const b of btns){
       const t=(b.textContent||'').trim().toLowerCase();
       if (/(^|\b)(yes|confirm|buy|purchase|ok|proceed)(\b|!|\.|,)/.test(t)) return b;
     }
-    return dialog.querySelector('button[class*="confirmButton"]') || null;
+    const byClass = dialog.querySelector('button[class*="confirmButton"]');
+    return byClass || null;
   }
 
   function makeYesTopRight(dialog){
@@ -200,20 +204,25 @@
     made.className='im-yes-made';
     made.textContent=(yes.textContent||'Yes').trim();
 
-    // Position: top-right, just left of the X
+    // position near the X (left of it)
     const pr = dialog.getBoundingClientRect();
     const xBtn = findCloseX(dialog);
     const xr  = xBtn ? xBtn.getBoundingClientRect() : {left: pr.right - 12, width: 12};
     const topPad = 8, gap = 8, width = Math.max(70, yes.getBoundingClientRect().width);
 
     made.style.top = `${topPad}px`;
-    made.style.right = `${Math.max(8, (pr.right - xr.left) + gap)}px`;
+    // right offset so it sits just to the left of the X
+    const rightPx = Math.max(8, (pr.right - xr.left) + gap);
+    made.style.right = `${rightPx}px`;
     made.style.width = `${width}px`;
     const yh = yes.getBoundingClientRect().height;
     if (yh>0) made.style.height = `${yh}px`;
 
-    // click forwards to real Yes
-    made.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); yes.click(); }, {capture:true});
+    // Forward click to native Yes
+    made.addEventListener('click', (e)=>{
+      e.preventDefault(); e.stopPropagation();
+      yes.click();
+    }, {capture:true});
 
     dialog.appendChild(made);
 
@@ -221,13 +230,15 @@
     const ro = new ResizeObserver(()=>{
       const pr2 = dialog.getBoundingClientRect();
       const xr2 = (findCloseX(dialog)?.getBoundingClientRect()) || {left: pr2.right - 12, width: 12};
-      made.style.right = `${Math.max(8, (pr2.right - xr2.left) + gap)}px`;
+      const rightPx2 = Math.max(8, (pr2.right - xr2.left) + gap);
+      made.style.right = `${rightPx2}px`;
     });
     ro.observe(dialog);
     window.addEventListener('scroll', ()=>{
       const pr2 = dialog.getBoundingClientRect();
       const xr2 = (findCloseX(dialog)?.getBoundingClientRect()) || {left: pr2.right - 12, width: 12};
-      made.style.right = `${Math.max(8, (pr2.right - xr2.left) + gap)}px`;
+      const rightPx2 = Math.max(8, (pr2.right - xr2.left) + gap);
+      made.style.right = `${rightPx2}px`;
     }, {passive:true});
   }
 
@@ -235,6 +246,7 @@
   const dialogMO = new MutationObserver(()=>{
     const dlg = findDialog();
     if (dlg){
+      // run a short poll to wait for native Yes if it mounts a tick later
       let tries = 0;
       const iv = setInterval(()=>{
         tries++;
@@ -245,7 +257,7 @@
   });
   dialogMO.observe(document.documentElement, {childList:true, subtree:true});
 
-  // Also sweep periodically (in case the dialog was already open)
+  // safety net (dialog already open)
   setInterval(()=>{ const dlg=findDialog(); if (dlg) makeYesTopRight(dlg); }, 300);
 
   // bootstrap rows
