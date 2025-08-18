@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Item Market — Floating Fill Max (Cheapest) + Floating YES
+// @name         Torn Item Market — Floating Fill Max (Top Row) + Floating YES
 // @namespace    https://torn.city/
-// @version      2.12.3
-// @description  Floating, draggable "FILL MAX" that pre-fills the cheapest listing with max affordable qty; floating, draggable "YES" that forwards to Torn’s native confirm. Both remember position; Alt+F/Alt+Y to trigger; Ctrl+Alt+F / Ctrl+Alt+Y to show/hide.
+// @version      2.12.4
+// @description  Floating, draggable "FILL MAX" that fills the TOP visible listing with max affordable qty; floating, draggable "YES" forwards to Torn’s native confirm. Alt+F / Alt+Y to trigger; Ctrl+Alt+F / Ctrl+Alt+Y to show/hide. Positions persist.
 // @author       Baz
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @run-at       document-idle
@@ -51,7 +51,6 @@
 
   function getRows(){
     const list=document.querySelector(SEL.list); if (!list) return [];
-    // Only real seller rows (skip header row which has priceHead/availableHead)
     return Array.from(list.querySelectorAll(`${SEL.rowWrapper} > ${SEL.row}`))
       .filter(r=>isVisible(r) && r.querySelector(SEL.price) && r.querySelector(SEL.qtyCell));
   }
@@ -72,7 +71,11 @@
     return Math.max(0, Math.min(Math.floor(wallet/unitPrice), qty));
   }
 
-  // Robustly find the active qty input inside a given row wrapper (retry after UI opens/re-renders)
+  async function ensureControlsOpen(row){
+    const btn=row.querySelector(SEL.showBtn);
+    if (btn) btn.click();
+    await sleep(60);
+  }
   async function findQtyInputWithRetries(rowWrapper, tries=25, delay=40){
     for (let i=0;i<tries;i++){
       const inp = Array.from(rowWrapper.querySelectorAll(SEL.amountInputs)).find(x=>{
@@ -83,15 +86,6 @@
     }
     return null;
   }
-
-  async function ensureControlsOpen(row){
-    // Click the per-row “show buy controls” if present
-    const btn = row.querySelector(SEL.showBtn);
-    if (btn) btn.click();
-    // Wait a beat for the controls to render
-    await sleep(60);
-  }
-
   function setInputValue(input, value){
     input.focus();
     const proto=Object.getPrototypeOf(input);
@@ -103,20 +97,22 @@
     input.blur();
   }
 
-  // Cheapest row chooser (by price text)
-  function getCheapestRow(){
-    let bestRow=null, bestPrice=Infinity, bestQty=NaN;
-    for (const row of getRows()){
-      const p = parseMoney(row.querySelector(SEL.price)?.textContent);
-      const q = toInt(row.querySelector(SEL.qtyCell)?.textContent);
-      if (Number.isFinite(p) && p < bestPrice){
-        bestPrice = p; bestRow = row; bestQty = q;
-      }
+  // --- NEW: pick the TOP visible seller row (first in list) ---
+  function getTopRow(){
+    const rows = getRows();
+    // Prefer the one with the smallest document Y (topmost)
+    let top = null, bestY = Infinity;
+    for (const row of rows){
+      const y = row.getBoundingClientRect().top;
+      if (y < bestY){ bestY = y; top = row; }
     }
-    return { row: bestRow, unit: bestPrice, qty: bestQty };
+    if (!top) return {row:null, unit:NaN, qty:NaN};
+    const unit = parseMoney(top.querySelector(SEL.price)?.textContent);
+    const qty  = toInt(top.querySelector(SEL.qtyCell)?.textContent);
+    return { row: top, unit, qty };
   }
 
-  // ---------- Dialog helpers for floating YES ----------
+  // ----- Confirm dialog helpers for floating YES -----
   function findDialog(){
     const list = document.querySelectorAll('[role="dialog"], [class*="modal"], [class*="Dialog"], [class*="dialog"], .confirmWrapper, .ui-dialog, .popup, [class*="confirmWrapper"]');
     const vis = Array.from(list).filter(isVisible);
@@ -131,7 +127,7 @@
     return yes || null;
   }
 
-  // ---------- Floating chips ----------
+  // ----- Floating chips -----
   const YES_POS_KEY='imYesFloatPos', YES_VIS_KEY='imYesFloatVisible';
   const FILL_POS_KEY='imFillFloatPos', FILL_VIS_KEY='imFillFloatVisible';
 
@@ -188,6 +184,7 @@
     }
     return btn;
   }
+
   function ensureFillChip(){
     let btn=document.querySelector('.im-chip.im-fill-chip');
     if (!btn){
@@ -200,29 +197,22 @@
       btn.addEventListener('click', async (e)=>{
         e.preventDefault(); e.stopPropagation();
 
-        const {row, unit, qty} = getCheapestRow();
-        if (!row || !Number.isFinite(unit)) { console.debug('[FillMax] No cheapest row found'); return; }
+        const {row, unit, qty} = getTopRow(); // <-- TOP ROW now
+        if (!row || !Number.isFinite(unit)) return;
 
         const wrap = getRowWrapper(row);
         const wallet = getWalletFromHeader();
         const afford = computeAfford(wallet, unit, qty);
 
-        console.debug('[FillMax] Picked row:', {unit, qty, wallet, afford});
-
         await ensureControlsOpen(row);
-
-        // re-resolve input within THIS row wrapper (handles re-render)
         const input = await findQtyInputWithRetries(wrap, 30, 50);
-        if (!input) { console.debug('[FillMax] Qty input not found after opening'); return; }
+        if (!input) return;
 
         setInputValue(input, afford>0?afford:'');
         if (afford<=0) input.placeholder='Insufficient funds';
 
-        // visual feedback
         input.style.boxShadow='0 0 0 3px rgba(14,165,233,.55)';
         setTimeout(()=>{ input.style.boxShadow=''; }, 260);
-
-        // ensure you see it
         wrap?.scrollIntoView({behavior:'smooth', block:'center'});
       },{capture:true});
 
