@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Cooldown & OC Sentinel
 // @namespace    http://tampermonkey.net/
-// @version      1.4.7
-// @description  API-only alerts for Drug (0), Booster (≤20h), Education finish, OC finished / Not in OC, and Racing (not in race). Semi-transparent flashing overlay + modal (Acknowledge = 1h snooze). Draggable UI & pill, starts minimised. Single Limited API key only. Author: BazookaJoe.
+// @version      1.4.8
+// @description  API-only alerts for Drug (0), Booster (≤20h), Education finish, OC finished / Not in OC, and Racing (not in race). Semi-transparent flashing overlay + modal (Acknowledge = 1h snooze, Snooze 5m). Draggable UI & pill, single Limited API key, starts minimised. Author: BazookaJoe.
 // @author       BazookaJoe
 // @match        https://www.torn.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
@@ -19,18 +19,23 @@
 (function () {
   'use strict';
 
-  // ========= Config =========
-  const POLL_MS = 3_600_000;            // 1 API sweep per hour
+  // ============== Config (kept stable) ==============
+  const POLL_MS = 3_600_000;            // one API sweep per hour
   const TICK_MS = 1_000;                // local countdown tick
   const FLASH_INTERVAL_MS = 800;        // overlay flash speed
-  const SNOOZE_MS = 5 * 60_000;         // Snooze 5m
-  const ACK_SNOOZE_MS = 60 * 60_000;    // Acknowledge = 1h
-  const BOOSTER_THRESHOLD_S = 20 * 3600;// 20 hours
-  const REATTACH_MS = 3_000;            // periodic UI self-heal
+  const SNOOZE_MS = 5 * 60_000;         // Snooze button = 5m
+  const ACK_SNOOZE_MS = 60 * 60_000;    // Acknowledge button = 1h (per your request)
+  const BOOSTER_THRESHOLD_S = 20 * 3600;// alert when booster < 20h
+  const REATTACH_MS = 3_000;            // UI self-heal
   const SAVE_DEBOUNCE_MS = 400;
-  const FORCE_MIN_ON_LOAD = true;       // default minimised
+  const FORCE_MIN_ON_LOAD = true;       // default minimised each load
+  const NOT_IN_OC_COOLDOWN_MS = 30 * 60_000;
+  const NOT_RACING_COOLDOWN_MS = 30 * 60_000;
 
-  // ========= Storage Keys =========
+  // Bootstraps timers with one immediate poll *only if* everything is 0
+  const BOOTSTRAP_IF_TIMERS_EMPTY = true;
+
+  // ============== Storage (kept stable) ==============
   const STORAGE = {
     key: 'tcos_api_key_v5',
     toggles: 'tcos_toggles_v7',
@@ -43,31 +48,31 @@
     lastPoll: 'tcos_last_poll_v1',
   };
 
-  // ========= Alerts + colours =========
+  // ============== Alerts/colors (kept stable) ==============
   const ALERTS = {
-    drug:    { key: 'drug',    label: 'Drug cooldown',            color: 'rgba(39,174,96,0.5)'  },
-    booster: { key: 'booster', label: 'Booster cooldown (≤20h)',  color: 'rgba(41,128,185,0.5)' },
-    edu:     { key: 'edu',     label: 'Education finished',       color: 'rgba(142,68,173,0.5)' },
-    oc:      { key: 'oc',      label: 'OC finished / Not in OC',  color: 'rgba(192,57,43,0.5)'  },
+    drug:    { key: 'drug',    label: 'Drug cooldown',            color: 'rgba(39,174,96,0.5)'  }, // green
+    booster: { key: 'booster', label: 'Booster cooldown (≤20h)',  color: 'rgba(41,128,185,0.5)' }, // blue
+    edu:     { key: 'edu',     label: 'Education finished',       color: 'rgba(142,68,173,0.5)' }, // purple
+    oc:      { key: 'oc',      label: 'OC finished / Not in OC',  color: 'rgba(192,57,43,0.5)'  }, // red
     race:    { key: 'race',    label: 'Racing: Not in a race',    color: 'rgba(241,196,15,0.5)' }, // yellow
   };
   const DEFAULT_TOGGLES = { drug:true, booster:true, edu:true, oc:true, race:true };
 
-  // ========= State =========
+  // ============== State (kept stable) ==============
   let API_KEY = '';
   let toggles = { ...DEFAULT_TOGGLES };
-  let snoozeUntil = {};                       // { key: timestamp }
-  let last = {};                              // scratch flags from last poll
-  let ends = { drug:0, booster:0, edu:0, oc:0 }; // absolute end-times (ms since epoch)
+  let snoozeUntil = {};                          // { key : epoch_ms }
+  let last = {};                                  // scratch flags from last sweep
+  let ends = { drug:0, booster:0, edu:0, oc:0 };  // absolute end times (ms)
   let flashTimer = null, currentAlertKey = null;
   let pillTick = null, pollTimer = null;
 
-  // ========= DOM Refs =========
+  // ============== DOM refs (kept stable) ==============
   let overlay, panel, pill;
   let masterToggle, keyInput, drugToggle, boosterToggle, eduToggle, ocToggle, raceToggle;
   let testsBtn, testsMenu, pillOpenBtn;
 
-  // ========= Helpers =========
+  // ============== Helpers (kept stable) ==============
   const pad2 = (n) => String(n).padStart(2, '0');
   const fmtHMS = (sec) => {
     if (!Number.isFinite(sec) || sec < 0) sec = 0;
@@ -76,14 +81,14 @@
   };
   const withinSnooze = (k) => Date.now() < (snoozeUntil[k] || 0);
   function setSnooze(k, ms) { snoozeUntil[k] = Date.now() + ms; GM_setValue(STORAGE.snooze, snoozeUntil); }
-  function secLeftFromEnd(endMs) { return Math.ceil((endMs - Date.now()) / 1000); }
+  function secLeft(endMs) { return Math.ceil((endMs - Date.now())/1000); }
   function setEndFromSeconds(key, seconds) { ends[key] = seconds > 0 ? (Date.now() + seconds * 1000) : 0; }
   const qs = (id) => document.getElementById(id);
   const root = () => document.body || document.documentElement;
   function safeAppend(el) { try { root().appendChild(el); } catch {} }
   const debounce = (fn, wait) => { let t=null; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), wait); }; };
 
-  // ========= Styles =========
+  // ============== Styles (kept stable) ==============
   GM_addStyle(`
     #tcos-overlay{position:fixed;inset:0;background:rgba(0,0,0,0);z-index:2147483646;pointer-events:none;transition:background-color 120ms linear;}
     #tcos-modal-wrap{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:2147483647;pointer-events:none;}
@@ -136,7 +141,7 @@
     #tcos-panel button:focus,#tcos-panel input:focus,#tcos-modal .btn:focus,.tcos-pill .open-ui:focus{outline:2px solid #fff;outline-offset:2px;}
   `);
 
-  // ========= Build UI (idempotent) =========
+  // ============== Build UI (kept stable) ==============
   function ensureUI() {
     // Overlay + modal
     let modalWrap = qs('tcos-modal-wrap');
@@ -200,7 +205,7 @@
         <div class="row"><span>Race</span><span id="pill-race">--</span></div>
       </div>`; safeAppend(s); return s;})();
 
-    // Bind buttons (once)
+    // Bind (stable)
     bindOnce('tcos-ack', 'click', onAck);
     bindOnce('tcos-ack-snooze', 'click', onAckSnooze);
     bindOnce('tcos-save', 'click', onSave);
@@ -241,7 +246,7 @@
 
     if (masterToggle.checked) pill.style.display = 'block';
 
-    // Save API key instantly on input/blur
+    // Save API key seamlessly
     if (keyInput && !keyInput.dataset.bound) {
       const saveKey = debounce(async () => {
         API_KEY = keyInput.value.trim();
@@ -255,7 +260,7 @@
   function bindOnce(id, evt, fn){ const el=qs(id); if(el && !el.dataset.bound){ el.addEventListener(evt, fn); el.dataset.bound='1'; } }
   function addTest(id, fn){ const el=qs(id); if (el && !el.dataset.bound){ el.addEventListener('click', fn); el.dataset.bound='1'; } }
 
-  // ========= Persist =========
+  // ============== Persistence (kept stable) ==============
   async function loadPersisted(){
     API_KEY = await GM_getValue(STORAGE.key, '');
     toggles = { ...DEFAULT_TOGGLES, ...(await GM_getValue(STORAGE.toggles, DEFAULT_TOGGLES)) };
@@ -263,7 +268,7 @@
     last = await GM_getValue(STORAGE.last, {});
     ends = await GM_getValue(STORAGE.ends, ends);
 
-    // UI values
+    // UI state
     keyInput.value = API_KEY || '';
     drugToggle.checked    = !!toggles.drug;
     boosterToggle.checked = !!toggles.booster;
@@ -271,7 +276,6 @@
     ocToggle.checked      = !!toggles.oc;
     raceToggle.checked    = !!toggles.race;
 
-    // Minimise default
     let min = true;
     if (!FORCE_MIN_ON_LOAD) {
       const stored = await GM_getValue(STORAGE.minimized, undefined);
@@ -280,7 +284,7 @@
     await GM_setValue(STORAGE.minimized, min);
     setMinimised(min);
 
-    // Positions
+    // restore positions
     const pos = await GM_getValue(STORAGE.pos, null);
     if (pos) { panel.style.left=`${pos.x}px`; panel.style.top=`${pos.y}px`; panel.style.right='auto'; panel.style.bottom='auto'; }
     const pillPos = await GM_getValue(STORAGE.pillPos, null);
@@ -294,7 +298,7 @@
     await GM_setValue(STORAGE.ends, ends);
   }
 
-  // ========= Flash / Modal =========
+  // ============== Flash/Modal (only change: Acknowledge = 1h snooze) ==============
   function startFlash(color, reason, heading){
     const msg = qs('tcos-msg'); const why = qs('tcos-why'); const mw = qs('tcos-modal-wrap');
     if (msg) msg.textContent = heading || 'Attention';
@@ -311,7 +315,7 @@
   function onAck(){ if(currentAlertKey){ setSnooze(currentAlertKey, ACK_SNOOZE_MS); } stopFlash(); }
   function onAckSnooze(){ if(currentAlertKey) setSnooze(currentAlertKey, SNOOZE_MS); stopFlash(); }
 
-  // ========= XHR helper =========
+  // ============== XHR helper (kept stable) ==============
   function xhrJSON(url){
     return new Promise((resolve,reject)=>{
       (GM.xmlHttpRequest||GM_xmlhttpRequest)({ method:'GET', url,
@@ -321,20 +325,25 @@
     });
   }
 
-  // ========= Poll bookkeeping =========
+  // ============== Poll bookkeeping (kept stable) ==============
   async function markPolled() { await GM_setValue(STORAGE.lastPoll, Date.now()); }
   async function shouldPollNow() {
-    const lp = await GM_getValue(STORAGE.lastPoll, 0);
+    const lp = await GM_GetValueSafe(STORAGE.lastPoll, 0);
     return (Date.now() - lp) >= POLL_MS;
   }
+  async function GM_GetValueSafe(key, def){ try{ return await GM_getValue(key, def); }catch{ return def; } }
 
-  // ========= API Refresh (only!) =========
-  async function refreshFromServer() {
+  // ============== API Refresh (kept stable, API-only) ==============
+  async function refreshFromServer(force = false) {
     if (!API_KEY) API_KEY = await GM_getValue(STORAGE.key, '');
     if (!qs('tcos-toggle')?.checked || !API_KEY) return;
-    if (!(await shouldPollNow())) return;
 
-    // 1) Cooldowns (drug/booster)
+    if (!force) {
+      const ok = await shouldPollNow();
+      if (!ok) return;
+    }
+
+    // 1) Cooldowns
     try {
       if (toggles.drug || toggles.booster) {
         const cd = await xhrJSON(`https://api.torn.com/user/?selections=cooldowns&key=${encodeURIComponent(API_KEY)}`);
@@ -344,7 +353,7 @@
         setEndFromSeconds('drug', drugS);
         setEndFromSeconds('booster', boosterS);
 
-        // edge-trigger alerts
+        // edge-trigger alerts from server edges
         if (toggles.drug && drugS === 0 && (last.drugS ?? 1) !== 0) {
           if (!withinSnooze('drug')) raiseAlert('drug','Drug cooldown is now 0.');
         }
@@ -372,7 +381,7 @@
       }
     } catch {}
 
-    // 3) Organized Crime (v2 preferred)
+    // 3) Organized Crime (v2)
     try {
       if (toggles.oc) {
         const v2 = await xhrJSON(`https://api.torn.com/v2/user/?selections=organizedcrime&key=${encodeURIComponent(API_KEY)}`);
@@ -388,12 +397,10 @@
           if (wasIn && left === 0 && !withinSnooze('oc')) raiseAlert('oc','OC finished.');
           last.ocInProgress = nowIn;
         } else {
-          // No OC showing in v2 → treat as not in OC (but rate-limit alert client-side)
           last.ocInProgress = false;
         }
       }
     } catch {
-      // If v2 fails totally, fall back to "not in OC" (we still don't DOM-scan)
       if (toggles.oc) last.ocInProgress = false;
     }
 
@@ -401,14 +408,12 @@
     try {
       if (toggles.race) {
         let inRace = null;
-        // v2 attempt
         try {
           const v2r = await xhrJSON(`https://api.torn.com/v2/user/?selections=racing&key=${encodeURIComponent(API_KEY)}`);
           const r = v2r?.racing || v2r?.race || v2r;
           if (r && (r.active === true || r?.status === 'racing' || r?.current || (Array.isArray(r?.queue) && r.queue.length > 0))) inRace = true;
           if (inRace === null && (r?.active === false || r?.status === 'idle')) inRace = false;
         } catch {}
-        // v1 fallback
         if (inRace === null) {
           const v1r = await xhrJSON(`https://api.torn.com/user/?selections=racing&key=${encodeURIComponent(API_KEY)}`);
           const r1 = v1r?.racing;
@@ -422,7 +427,6 @@
           }
         }
         last.raceInProgress = !!inRace;
-        // We don't auto-alert here; pill shows status and "not racing" alert is handled client-side with cooldown
       }
     } catch {}
 
@@ -430,45 +434,44 @@
     await markPolled();
   }
 
-  // ========= Local tick (render) =========
+  // ============== Local render tick (kept stable) ==============
   function renderPill(){
     const setText=(id,txt)=>{ const el=qs(id); if (el) el.textContent = txt; };
 
-    // drug / booster
-    const drugLeft = ends.drug ? secLeftFromEnd(ends.drug) : 0;
-    const boosterLeft = ends.booster ? secLeftFromEnd(ends.booster) : 0;
-    setText('pill-drug',    fmtHMS(Math.max(0,drugLeft)));
-    setText('pill-booster', fmtHMS(Math.max(0,boosterLeft)));
+    // Cooldowns
+    const dLeft = ends.drug ? secLeft(ends.drug) : 0;
+    const bLeft = ends.booster ? secLeft(ends.booster) : 0;
+    setText('pill-drug',    fmtHMS(Math.max(0, dLeft)));
+    setText('pill-booster', fmtHMS(Math.max(0, bLeft)));
 
-    // education
-    const eduLeft = ends.edu ? secLeftFromEnd(ends.edu) : 0;
-    setText('pill-edu', (ends.edu && eduLeft>0) ? fmtHMS(eduLeft) : 'idle');
+    // Education
+    const eLeft = ends.edu ? secLeft(ends.edu) : 0;
+    setText('pill-edu', (ends.edu && eLeft>0) ? fmtHMS(eLeft) : 'idle');
 
     // OC
-    const ocLeft = ends.oc ? secLeftFromEnd(ends.oc) : 0;
-    setText('pill-oc', ends.oc ? (ocLeft>0?fmtHMS(ocLeft):'ready') : (last.ocInProgress===false?'not in OC':'…'));
+    const oLeft = ends.oc ? secLeft(ends.oc) : 0;
+    setText('pill-oc', ends.oc ? (oLeft>0?fmtHMS(oLeft):'ready') : (last.ocInProgress===false?'not in OC':'…'));
 
     // Racing
     setText('pill-race', (last.raceInProgress === true) ? 'in race' : (last.raceInProgress === false ? 'not racing' : '…'));
 
-    // client-side finish guards (no extra API calls)
-    if (toggles.drug && drugLeft===0 && (last._drugWasZero!==true)){
+    // Client-side finish guards (no extra API calls)
+    if (toggles.drug && dLeft===0 && (last._drugWasZero!==true)){
       if(!withinSnooze('drug')) raiseAlert('drug','Drug cooldown is now 0.'); last._drugWasZero=true;
-    } else if (drugLeft>0){ last._drugWasZero=false; }
+    } else if (dLeft>0){ last._drugWasZero=false; }
 
-    if (toggles.oc && ends.oc && ocLeft===0 && (last._ocWasZero!==true)){
+    if (toggles.oc && ends.oc && oLeft===0 && (last._ocWasZero!==true)){
       if(!withinSnooze('oc')) raiseAlert('oc','OC finished.'); last._ocWasZero=true;
-    } else if (ocLeft>0){ last._ocWasZero=false; }
+    } else if (oLeft>0){ last._ocWasZero=false; }
 
-    // Booster threshold notice during tick only if we have a new crossing (guard by a latch)
-    if (toggles.booster && boosterLeft>0 && boosterLeft<=BOOSTER_THRESHOLD_S){
-      if (!last._boosterLatched){ if(!withinSnooze('booster')) raiseAlert('booster', `Booster cooldown ≤ 20 hours (${fmtHMS(boosterLeft)} remaining).`); last._boosterLatched=true; }
+    if (toggles.booster && bLeft>0 && bLeft<=BOOSTER_THRESHOLD_S){
+      if (!last._boosterLatched){ if(!withinSnooze('booster')) raiseAlert('booster', `Booster cooldown ≤ 20 hours (${fmtHMS(bLeft)} remaining).`); last._boosterLatched=true; }
     } else {
       last._boosterLatched=false;
     }
   }
 
-  // ========= Dragging =========
+  // ============== Dragging (kept stable) ==============
   function makePanelDraggable(){
     const head=qs('tcos-head'); if(!head || head.dataset.bound) return;
     let dragging=false, startX=0, startY=0;
@@ -504,7 +507,7 @@
     else { panel.style.display='block'; GM_setValue(STORAGE.minimized,false); }
   }
 
-  // ========= Events =========
+  // ============== Events (kept stable) ==============
   async function onSave(){
     API_KEY = keyInput.value.trim();
     toggles = {
@@ -516,13 +519,13 @@
     };
     await persist();
 
-    // Re-arm hourly poll
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(refreshFromServer, POLL_MS);
-    refreshFromServer(); // do an immediate sweep if due
+    // Do a sweep now only if due; timers continue locally
+    refreshFromServer(false);
   }
 
-  // ========= Init =========
+  // ============== Init (kept stable; plus bootstrap-if-empty) ==============
   async function init(){
     ensureUI();
     if (FORCE_MIN_ON_LOAD) setMinimised(true);
@@ -532,15 +535,22 @@
     pillTick = setInterval(renderPill, TICK_MS);
     renderPill();
 
-    // Hourly poller + “poll on visibility if stale”
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(refreshFromServer, POLL_MS);
+
     document.addEventListener('visibilitychange', async () => {
       if (document.visibilityState === 'visible') {
         if (await shouldPollNow()) refreshFromServer();
       }
     });
-    if (await shouldPollNow()) refreshFromServer();
+
+    // Bootstrap: if all timers are zero, do a one-off poll to populate
+    if (BOOTSTRAP_IF_TIMERS_EMPTY && API_KEY) {
+      const allZero = !ends.drug && !ends.booster && !ends.edu && !ends.oc;
+      if (allZero) await refreshFromServer(true);
+    } else {
+      if (await shouldPollNow()) refreshFromServer();
+    }
 
     // Self-heal UI
     const mo=new MutationObserver(()=>{
