@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Cooldown & OC Sentinel
 // @namespace    http://tampermonkey.net/
-// @version      1.4.2
+// @version      1.4.4
 // @description  Semi-transparent full-screen flash + modal acknowledge for: Drug (0), Booster (≤20h), Education finish, OC finished / Not in OC, and Racing (not in race). PDA-friendly, draggable, minimisable (starts minimised). Single API key (Limited). Overlay is click-through; modal captures clicks. Author: BazookaJoe.
 // @author       BazookaJoe
 // @match        https://www.torn.com/*
@@ -25,8 +25,10 @@
   const POLL_MS = 3_600_000;            // 1 API sweep per hour
   const TICK_MS = 1_000;                // local countdown tick
   const OC_DOM_SCAN_MS = 10_000;        // lightweight DOM check for OC status
+  const RACE_DOM_SCAN_MS = 10_000;      // lightweight DOM check for racing status
   const FLASH_INTERVAL_MS = 800;        // overlay flash speed
-  const SNOOZE_MS = 5 * 60_000;         // Snooze 5m
+  const SNOOZE_MS = 5 * 60_000;         // Snooze button = 5m
+  const ACK_SNOOZE_MS = 60 * 60_000;    // Acknowledge button = 1h
   const BOOSTER_THRESHOLD_S = 20 * 3600;// 20 hours
   const NOT_IN_OC_COOLDOWN_MS = 30 * 60_000;
   const NOT_RACING_COOLDOWN_MS = 30 * 60_000;
@@ -40,7 +42,7 @@
     key: 'tcos_api_key_v5',
     keyV4: 'tcos_api_key_v4',
     keyV3: 'tcos_api_key_v3',
-    toggles: 'tcos_toggles_v6',       // bumped for new toggle
+    toggles: 'tcos_toggles_v6',       // includes 'race'
     snooze: 'tcos_snooze_v6',
     last: 'tcos_last_v6',
     ends: 'tcos_ends_v5',
@@ -73,6 +75,7 @@
   let pillTick = null;
   let pollTimer = null;
   let ocDomTimer = null;
+  let raceDomTimer = null;
   let ocUnknownStreak = 0;
   const OC_UNKNOWN_STREAK_MAX = 3;
 
@@ -168,15 +171,12 @@
           <p id="tcos-msg">Something needs your attention.</p>
           <div class="why" id="tcos-why"></div>
           <div class="row">
-            <button class="btn" id="tcos-ack">Acknowledge</button>
+            <button class="btn" id="tcos-ack">Acknowledge (1h)</button>
             <button class="btn secondary" id="tcos-ack-snooze">Snooze 5m</button>
           </div>
         </div>`;
       safeAppend(modalWrap);
     }
-    let msgEl = qs('tcos-msg'), whyEl = qs('tcos-why');
-    let ackBtn = qs('tcos-ack'), ackSnoozeBtn = qs('tcos-ack-snooze');
-
     overlay = qs('tcos-overlay') || (()=>{const d=document.createElement('div');d.id='tcos-overlay';safeAppend(d);return d;})();
 
     // Panel
@@ -281,31 +281,7 @@
       const el = qs(id);
       if (el && !el.dataset.bound){ el.addEventListener('click', fn); el.dataset.bound='1'; }
     }
-
-    // Ack handlers
-    function onAck(){ if(currentAlertKey){ clearSnooze(currentAlertKey); persist(); } stopFlash(); }
-    function onAckSnooze(){ if(currentAlertKey) setSnooze(currentAlertKey); stopFlash(); }
-
-    // Modal controls
-    function startFlash(color, reason, heading){
-      qs('tcos-msg').textContent = heading || 'Attention';
-      qs('tcos-why').textContent = reason || '';
-      qs('tcos-modal-wrap').style.display = 'flex';
-
-      overlay.style.background = 'transparent';
-      if (flashTimer) clearInterval(flashTimer);
-      let on = false;
-      flashTimer = setInterval(()=>{ on=!on; overlay.style.backgroundColor = on ? color : 'rgba(0,0,0,0.0)'; }, FLASH_INTERVAL_MS);
-    }
-    function stopFlash(){ if(flashTimer) clearInterval(flashTimer); flashTimer=null; overlay.style.background='transparent'; qs('tcos-modal-wrap').style.display='none'; }
-    function raiseAlert(alertKey, reasonText){ if(!toggles[alertKey]) return; if(withinSnooze(alertKey)) return;
-      currentAlertKey=alertKey; const {color,label}=ALERTS[alertKey]; startFlash(color, reasonText, label); }
-
-    // attach to global scope for other functions
-    window.tcos_raiseAlert = raiseAlert;
-    window.tcos_stopFlash  = stopFlash;
   }
-
   function bindOnce(id, evt, fn){ const el=qs(id); if(el && !el.dataset.bound){ el.addEventListener(evt, fn); el.dataset.bound='1'; } }
 
   // Persist
@@ -315,8 +291,7 @@
   async function loadPersisted() {
     API_KEY = await migrateKey() || await GM_getValue(STORAGE.key, '');
     const storedToggles = await GM_getValue(STORAGE.toggles, { ...DEFAULT_TOGGLES });
-    // migrate old toggles: ensure 'race' exists
-    toggles = { ...DEFAULT_TOGGLES, ...storedToggles };
+    toggles = { ...DEFAULT_TOGGLES, ...storedToggles }; // ensure 'race'
     snoozeUntil = await GM_getValue(STORAGE.snooze, {});
     last = await GM_getValue(STORAGE.last, {});
     ends = await GM_getValue(STORAGE.ends, ends);
@@ -355,13 +330,30 @@
     await GM_setValue(STORAGE.ends, ends);
   }
 
-  // Flash helpers (access via window.tcos_*)
+  // Flash / Modal
+  function startFlash(color, reason, heading){
+    const msg = qs('tcos-msg'); const why = qs('tcos-why'); const mw = qs('tcos-modal-wrap');
+    if (msg) msg.textContent = heading || 'Attention';
+    if (why) why.textContent = reason || '';
+    if (mw) mw.style.display = 'flex';
+    overlay.style.background = 'transparent';
+    if (flashTimer) clearInterval(flashTimer);
+    let on = false;
+    flashTimer = setInterval(()=>{ on=!on; overlay.style.backgroundColor = on ? color : 'rgba(0,0,0,0.0)'; }, FLASH_INTERVAL_MS);
+  }
   function stopFlash(){ if(flashTimer) clearInterval(flashTimer); flashTimer=null; overlay.style.background='transparent'; const mw=qs('tcos-modal-wrap'); if(mw) mw.style.display='none'; }
+  function raiseAlert(alertKey, reasonText){ if(!toggles[alertKey]) return; if(withinSnooze(alertKey)) return;
+    currentAlertKey=alertKey; const {color,label}=ALERTS[alertKey]; startFlash(color, reasonText, label); }
+  function onAck(){ // Acknowledge now snoozes the current alert for 1 hour
+    if(currentAlertKey){ setSnooze(currentAlertKey, ACK_SNOOZE_MS); persist(); }
+    stopFlash();
+  }
+  function onAckSnooze(){ if(currentAlertKey) setSnooze(currentAlertKey); stopFlash(); }
 
   // XHR helper
   function xhrJSON(url){
     return new Promise((resolve,reject)=>{
-      (GM.xmlHttpRequest||GM_xmlhttpRequest)({ method:'GET', url,
+      (GM.xmlHttpRequest||GM_xmlHttpRequest)({ method:'GET', url,
         onload:(res)=>{ try{ const data=JSON.parse(res.responseText);
           if (data?.error) return reject(new Error(data.error.error||'API error')); resolve(data);
         }catch(e){ reject(e); } }, onerror:reject });
@@ -397,12 +389,12 @@
         setEndFromSeconds('booster', boosterS);
 
         if (toggles.drug && drugS === 0 && (last.drugS ?? 1) !== 0) {
-          if (!withinSnooze('drug')) window.tcos_raiseAlert('drug','Drug cooldown is now 0.');
+          if (!withinSnooze('drug')) raiseAlert('drug','Drug cooldown is now 0.');
         }
         if (toggles.booster && boosterS > 0 && boosterS <= BOOSTER_THRESHOLD_S) {
           const wasAbove = (last.boosterS ?? (BOOSTER_THRESHOLD_S + 1)) > BOOSTER_THRESHOLD_S;
           if (wasAbove && !withinSnooze('booster')) {
-            window.tcos_raiseAlert('booster', `Booster cooldown ≤ 20 hours (${fmtHMS(boosterS)} remaining).`);
+            raiseAlert('booster', `Booster cooldown ≤ 20 hours (${fmtHMS(boosterS)} remaining).`);
           }
         }
         last.drugS = drugS;
@@ -418,7 +410,7 @@
         setEndFromSeconds('edu', timeLeft);
         const wasActive = !!last.eduActive;
         const activeNow = (edu?.education_current ?? 0) > 0 || timeLeft > 0;
-        if (wasActive && timeLeft === 0 && !withinSnooze('edu')) window.tcos_raiseAlert('edu','Education course finished.');
+        if (wasActive && timeLeft === 0 && !withinSnooze('edu')) raiseAlert('edu','Education course finished.');
         last.eduActive = activeNow;
       }
     } catch {}
@@ -436,7 +428,7 @@
 
           const wasIn = !!last.ocInProgress;
           const nowIn = left > 0;
-          if (wasIn && left === 0 && !withinSnooze('oc')) window.tcos_raiseAlert('oc','OC finished.');
+          if (wasIn && left === 0 && !withinSnooze('oc')) raiseAlert('oc','OC finished.');
           last.ocInProgress = nowIn;
           ocUnknownStreak = 0;
         }
@@ -446,19 +438,17 @@
     // Racing status (tries v2 then v1 gracefully)
     try {
       if (toggles.race) {
-        // v2 attempt
         let inRace = null;
+        // v2 attempt
         try {
           const v2r = await xhrJSON(`https://api.torn.com/v2/user/?selections=racing&key=${encodeURIComponent(API_KEY)}`);
-          // Heuristics: consider active race if a current event/queue exists
           const r = v2r?.racing || v2r?.race || v2r;
-          if (r && (r.active === true || r?.status === 'racing' || r?.current || r?.queue?.length > 0)) inRace = true;
+          if (r && (r.active === true || r?.status === 'racing' || r?.current || (Array.isArray(r?.queue) && r.queue.length > 0))) inRace = true;
           if (inRace === null && (r?.active === false || r?.status === 'idle')) inRace = false;
         } catch {}
         // v1 fallback
         if (inRace === null) {
           const v1r = await xhrJSON(`https://api.torn.com/user/?selections=racing&key=${encodeURIComponent(API_KEY)}`);
-          // Common shapes seen: { racing: { status: "Racing"|"Idle"|..., ... } }
           const r1 = v1r?.racing;
           if (r1 && (r1.status || r1?.in_race)) {
             const s = String(r1.status || (r1.in_race ? 'Racing' : 'Idle')).toLowerCase();
@@ -473,7 +463,7 @@
           if (!inRace) {
             const lastAlert = last.raceNotInAlertedAt || 0;
             if (Date.now() - lastAlert > NOT_RACING_COOLDOWN_MS && !withinSnooze('race')) {
-              window.tcos_raiseAlert('race','You are not in a race.');
+              raiseAlert('race','You are not in a race.');
               last.raceNotInAlertedAt = Date.now();
             }
           }
@@ -523,10 +513,39 @@
         if (!wasIn){
           const lastAlert=last.ocNotInOcAlertedAt||0;
           if (Date.now()-lastAlert>NOT_IN_OC_COOLDOWN_MS && !withinSnooze('oc')){
-            window.tcos_raiseAlert('oc','You are not in an OC.'); last.ocNotInOcAlertedAt=Date.now();
+            raiseAlert('oc','You are not in an OC.'); last.ocNotInOcAlertedAt=Date.now();
           }
         }
       }
+    }
+  }
+
+  // Racing DOM fallback (detect "in race" promptly on any page)
+  function scanRaceDom() {
+    if (!toggles.race) return;
+
+    // Look for strong cues that you are currently in a race
+    const body = document.body;
+    let inRaceNow = false;
+
+    // 1) The explicit "Leave this race" link/button appears on the race page
+    const leaveBtn = Array.from(body.querySelectorAll('a,button'))
+      .find(el => /leave\s+this\s+race/i.test(el.textContent || ''));
+
+    // 2) Race HUD rows with positions / laps (e.g., "Pos: 2/6", "Lap: 0/9")
+    const hudTextHit = !!Array.from(body.querySelectorAll('div,span,td'))
+      .find(el => /Pos:\s*\d+\/\d+|Lap:\s*\d+\/\d+|Link to the race/i.test((el.textContent || '').trim()));
+
+    // 3) URL hint (when on race page)
+    const onRaceUrl = /\/page\.php\?sid=racing|\/racing\.php|\/race(way)?/i.test(location.href);
+
+    if (leaveBtn || (hudTextHit && onRaceUrl)) inRaceNow = true;
+
+    if (inRaceNow) {
+      last.raceInProgress = true;
+    } else {
+      const joinCta = Array.from(body.querySelectorAll('a,button')).some(el => /join\s+a\s+race|create\s+race/i.test(el.textContent || ''));
+      if (joinCta) last.raceInProgress = false;
     }
   }
 
@@ -548,15 +567,15 @@
     const ocLeft = ends.oc ? secLeftFromEnd(ends.oc) : 0;
     const ocEl=qs('pill-oc'); if (ocEl) ocEl.textContent = ends.oc ? (ocLeft>0?fmtHMS(ocLeft):'ready') : (last.ocInProgress===false?'not in OC':'…');
 
-    // Racing
+    // Racing (from API + DOM fallback)
     const raceEl = qs('pill-race');
     if (raceEl) raceEl.textContent = (last.raceInProgress === true) ? 'in race' : (last.raceInProgress === false ? 'not racing' : '…');
 
     // client-side finish guards (no extra API calls)
-    if (toggles.drug && drugLeft===0 && (last._drugWasZero!==true)){ if(!withinSnooze('drug')) window.tcos_raiseAlert('drug','Drug cooldown is now 0.'); last._drugWasZero=true; }
+    if (toggles.drug && drugLeft===0 && (last._drugWasZero!==true)){ if(!withinSnooze('drug')) raiseAlert('drug','Drug cooldown is now 0.'); last._drugWasZero=true; }
     else if (drugLeft>0){ last._drugWasZero=false; }
 
-    if (toggles.oc && ends.oc && ocLeft===0 && (last._ocWasZero!==true)){ if(!withinSnooze('oc')) window.tcos_raiseAlert('oc','OC finished.'); last._ocWasZero=true; }
+    if (toggles.oc && ends.oc && ocLeft===0 && (last._ocWasZero!==true)){ if(!withinSnooze('oc')) raiseAlert('oc','OC finished.'); last._ocWasZero=true; }
     else if (ocLeft>0){ last._ocWasZero=false; }
   }
 
@@ -627,6 +646,10 @@
     if (ocDomTimer) clearInterval(ocDomTimer);
     ocDomTimer = setInterval(scanOCDom, OC_DOM_SCAN_MS);
     scanOCDom();
+
+    if (raceDomTimer) clearInterval(raceDomTimer);
+    raceDomTimer = setInterval(scanRaceDom, RACE_DOM_SCAN_MS);
+    scanRaceDom();
   }
 
   // Init
@@ -654,6 +677,10 @@
     if (ocDomTimer) clearInterval(ocDomTimer);
     ocDomTimer = setInterval(scanOCDom, OC_DOM_SCAN_MS);
     scanOCDom();
+
+    if (raceDomTimer) clearInterval(raceDomTimer);
+    raceDomTimer = setInterval(scanRaceDom, RACE_DOM_SCAN_MS);
+    scanRaceDom();
 
     if (qs('tcos-toggle')?.checked) pill.style.display='block';
 
