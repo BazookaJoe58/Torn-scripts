@@ -51,8 +51,8 @@
     PERF_MAXPASS: 'TMS_maxPerPass_v1',
   };
 
-  const DEF_DOLLAR  = { tier6: 60000, tier5: 50000, tier4: 40000, tier3: 30000, tier2: 20000, tier1: 10000 };
-  const DEF_PERCENT = { tier6:    14, tier5:    13, tier4:    12, tier3:    11, tier2:    10, tier1:     9 };
+  const DEF_DOLLAR  = { tier6: 200000, tier5: 50000, tier4: 40000, tier3: 30000, tier2: 20000, tier1: 10000 };
+  const DEF_PERCENT = { tier6:    20, tier5:    13, tier4:    12, tier3:    11, tier2:    10, tier1:     9 };
 
   const S = {
     apiKey: '',
