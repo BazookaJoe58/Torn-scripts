@@ -448,7 +448,7 @@
       const tax = document.createElement('div');
       tax.className = 'tms-mini';
       tax.innerHTML = `
-        <span class="baz">($${Math.floor(price * 0.9).toLocaleString()})</span>
+        <span class="baz">($${Math.floor(price * 0.857).toLocaleString()})</span>
         <span class="tax">($${Math.floor(price * 0.95).toLocaleString()})</span>`;
       wrap.appendChild(tax);
     }
