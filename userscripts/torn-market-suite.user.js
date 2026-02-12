@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Market Suite (MV/PD + Corner % + List stack $ then %) - Toggleable Panel
 // @namespace    http://tampermonkey.net/
-// @version      5.1.9
+// @version      5.1.10
 // @description  Three-tab UI (Main/MV/PD). Full-tile/row overlay (T5/T6 semi-transparent). Grid: corner $ + corner % + orange after-tax profit (>0 only); List: tax lines then $ delta then % delta under price. PD overlay only on the single cheapest listing vs the next higher price. Panel opens/closes via MS toggle, has a close (×) button, and supports Esc. Fonts +1px. MS tab always visible. Auto-refreshes MV every 5 min. Author: BazookaJoe.
 // @author       BazookaJoe
 // @license      MIT
@@ -448,7 +448,7 @@
       const tax = document.createElement('div');
       tax.className = 'tms-mini';
       tax.innerHTML = `
-        <span class="baz">($${Math.floor(price * 0.907).toLocaleString()})</span>
+        <span class="baz">($${Math.floor(price * 0.916).toLocaleString()})</span>
         <span class="tax">($${Math.floor(price * 0.95).toLocaleString()})</span>`;
       wrap.appendChild(tax);
     }
