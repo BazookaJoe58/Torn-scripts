@@ -4,6 +4,8 @@
 // @version      0.7.4
 // @description  All-in-one helper. Modular features with individual on/off toggles. Includes Cooldown Alerts (drug, booster, education, OC, racing). Works on Tampermonkey (PC) and Torn PDA (mobile).
 // @author       Cam
+// @updateURL    https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/refs/heads/main/Torn%20Helper
+// @downloadURL  https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/refs/heads/main/Torn%20Helper
 // @match        https://www.torn.com/*
 // @grant        none
 // @run-at       document-idle
