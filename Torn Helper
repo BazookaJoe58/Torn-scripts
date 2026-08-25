@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Helper
 // @namespace    cam.torn.tools
-// @version      0.7.5
+// @version      0.7.6
 // @description  All-in-one helper. Modular features with individual on/off toggles. Includes Cooldown Alerts (drug, booster, education, OC, racing). Works on Tampermonkey (PC) and Torn PDA (mobile).
 // @author       Cam
 // @updateURL    https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/refs/heads/main/Torn%20Helper
@@ -39,6 +39,7 @@
  *    SECTION 10  FEATURE: TRAVEL (OC clash warning)
  *    SECTION 11  FEATURE: GYM (stat balancer)
  *    SECTION 12  FEATURE: PAGE INSPECTOR (developer)
+ *    SECTION 12b FEATURE: GENERAL (to-do list)
  *    SECTION 13  FEATURE: placeholders
  *    SECTION 14  STYLES
  *    SECTION 15  UI
@@ -67,12 +68,13 @@
   const CONFIG = {
     scriptName: 'Torn Helper',
     scriptShort: 'TH',
-    version: '0.7.5',
+    version: '0.7.6',
     logLevel: 'info',        // debug | info | warn | error | silent
     logBufferSize: 400,
     storageKeys: {
       settings: 'th.settings.v1',
-      apiKey: 'th.apikey'
+      apiKey: 'th.apikey',
+      todoItems: 'th.todo.items.v1'
     },
     ui: {
       mobileBreakpoint: 700,
@@ -448,6 +450,14 @@
       let dragging = false, offX = 0, offY = 0;
       function pt(e) { return e.touches && e.touches[0] ? e.touches[0] : e; }
       function down(e) {
+        // Let taps on a real control inside the handle (e.g. a close button
+        // in a floating window's header) act normally instead of being
+        // captured as the start of a drag — preventDefault below otherwise
+        // suppresses the synthetic click a touchstart/touchend would fire,
+        // which is why a button inside a draggable header stops responding
+        // on touch devices (PDA) even though it still works with a mouse.
+        if (e.target && e.target.closest &&
+            e.target.closest('button, input, textarea, select, a')) return;
         dragging = true;
         const r = el.getBoundingClientRect(), p = pt(e);
         offX = p.clientX - r.left; offY = p.clientY - r.top;
@@ -3981,6 +3991,166 @@
     init: function () { return INSPECT.start(); }
   });
   /* ==========================================================================
+   * SECTION 12b — FEATURE: GENERAL (to-do list)
+   *
+   * A plain checklist: add, tick off, delete, drag to reorder. No API calls,
+   * nothing to poll — it is just local data, so its panel is reachable
+   * whether the feature is switched on or off (same as the market highlight
+   * settings). Floats like the watchlist and inspector so it can stay open
+   * while you play.
+   * ======================================================================== */
+  const TODO = (function () {
+    let items = PLATFORM.storage.get(CONFIG.storageKeys.todoItems, []);
+    let host = null;
+    let dragId = null, dragCleanup = null;
+    function save() { PLATFORM.storage.set(CONFIG.storageKeys.todoItems, items); }
+    function addItem(text) {
+      const t = String(text || '').trim();
+      if (!t) return;
+      items.push({ id: Date.now() + '-' + Math.random().toString(36).slice(2, 7), text: t, done: false });
+      save();
+      LOG.info('todo item added');
+      render();
+    }
+    function toggleItem(id) {
+      const it = items.filter(function (i) { return i.id === id; })[0];
+      if (!it) return;
+      it.done = !it.done;
+      save();
+      render();
+    }
+    function removeItem(id) {
+      items = items.filter(function (i) { return i.id !== id; });
+      save();
+      LOG.info('todo item removed');
+      render();
+    }
+    /* ---- drag to reorder ---------------------------------------------------
+     * Grabbing the handle picks up that row; moving over another row swaps it
+     * into that position immediately, same feel as reordering a home screen.
+     * ------------------------------------------------------------------ */
+    function indexOf(id) { return items.findIndex(function (i) { return i.id === id; }); }
+    function startDrag(id, row) {
+      dragId = id;
+      row.classList.add('th-todo-dragging');
+      function pt(e) { return (e.touches && e.touches[0]) ? e.touches[0] : e; }
+      function move(e) {
+        if (!dragId || !host) return;
+        const p = pt(e);
+        const rows = [].slice.call(host.querySelectorAll('.th-todo-row'));
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i].getBoundingClientRect();
+          const overId = rows[i].dataset.id;
+          if (overId === dragId) continue;
+          if (p.clientY >= r.top && p.clientY <= r.bottom) {
+            const from = indexOf(dragId), to = indexOf(overId);
+            if (from === -1 || to === -1 || from === to) break;
+            const moved = items.splice(from, 1)[0];
+            items.splice(to, 0, moved);
+            render();
+            break;
+          }
+        }
+        e.preventDefault();
+      }
+      function up() {
+        if (!dragId) return;
+        dragId = null;
+        save();
+        window.removeEventListener('mousemove', move);
+        window.removeEventListener('touchmove', move);
+        window.removeEventListener('mouseup', up);
+        window.removeEventListener('touchend', up);
+        render();
+      }
+      window.addEventListener('mousemove', move);
+      window.addEventListener('touchmove', move, { passive: false });
+      window.addEventListener('mouseup', up);
+      window.addEventListener('touchend', up);
+      dragCleanup = up;
+    }
+    function rowHtml(it) {
+      return '<div class="th-todo-row' + (it.done ? ' done' : '') + '" data-id="' + it.id + '">' +
+             '<span class="th-todo-drag" title="Drag to reorder">⠿</span>' +
+             '<button class="th-todo-check' + (it.done ? ' on' : '') + '" data-tdchk="' + it.id + '"></button>' +
+             '<span class="th-todo-text">' + UTIL.escapeHtml(it.text) + '</span>' +
+             '<button class="th-todo-x" data-tdrm="' + it.id + '">✕</button>' +
+             '</div>';
+    }
+    function render() {
+      if (!host || !host.isConnected) return;
+      const list = host.querySelector('#th-todo-list');
+      if (!list) return;
+      list.innerHTML = items.length
+        ? items.map(rowHtml).join('')
+        : '<div class="th-empty">Nothing on the list yet.</div>';
+      list.querySelectorAll('[data-tdchk]').forEach(function (b) {
+        b.addEventListener('click', function () { toggleItem(b.dataset.tdchk); });
+      });
+      list.querySelectorAll('[data-tdrm]').forEach(function (b) {
+        b.addEventListener('click', function () { removeItem(b.dataset.tdrm); });
+      });
+      list.querySelectorAll('.th-todo-drag').forEach(function (handle) {
+        const row = handle.closest('.th-todo-row');
+        handle.addEventListener('mousedown', function (e) { e.preventDefault(); startDrag(row.dataset.id, row); });
+        handle.addEventListener('touchstart', function (e) { e.preventDefault(); startDrag(row.dataset.id, row); }, { passive: false });
+      });
+    }
+    function renderPanel(container) {
+      host = container;
+      container.innerHTML =
+        '<div class="th-pad">' +
+        '<div class="th-h4">To-do list</div>' +
+        '<div class="th-btns" style="margin-bottom:10px">' +
+        '<input class="th-search" id="th-todo-add" type="text" placeholder="Add an item" style="flex:1;min-width:110px">' +
+        '<button class="th-btn acc" data-td="add">Add</button>' +
+        '</div>' +
+        '<div id="th-todo-list"></div>' +
+        '</div>';
+      const input = container.querySelector('#th-todo-add');
+      container.querySelector('[data-td="add"]').addEventListener('click', function () {
+        addItem(input.value);
+        input.value = '';
+      });
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { addItem(input.value); input.value = ''; }
+      });
+      render();
+    }
+    return {
+      renderPanel: renderPanel,
+      summary: function () {
+        if (!items.length) return 'empty';
+        const open = items.filter(function (i) { return !i.done; }).length;
+        return open + ' open';
+      },
+      start: function () {
+        return function cleanup() {
+          if (dragCleanup) dragCleanup();
+          host = null;
+        };
+      }
+    };
+  })();
+  REGISTRY.register({
+    id: 'gen-todo',
+    name: 'To-do list',
+    category: 'General',
+    info: 'A plain checklist — add items, tick them off, delete them, and drag to ' +
+          'reorder. Stored locally in this browser only, no API calls. The panel is ' +
+          'always reachable from the Open button whether this is switched on or not, ' +
+          'same as everything else with a settings screen.',
+    match: null,
+    defaultOn: false,
+    needsApiKey: false,
+    apiAccess: null,
+    apiSelections: [],
+    floatable: true,
+    liveValue: function () { return TODO.summary(); },
+    panel: TODO.renderPanel,
+    init: function () { return TODO.start(); }
+  });
+  /* ==========================================================================
    * SECTION 13 — FEATURE: placeholders
    * Empty slots so the UI has something to test against. Delete freely.
    * ======================================================================== */
@@ -4249,6 +4419,22 @@
   .th-wl-x { flex:none; background:none; border:none; color:var(--th-dim);
     cursor:pointer; font-size:13px; padding:2px 4px; }
   .th-wl-x:hover { color:var(--th-err); }
+  /* ---- to-do list ---- */
+  .th-todo-row { display:flex; align-items:center; gap:8px; padding:7px 0;
+    border-bottom:1px solid var(--th-bg3); }
+  .th-todo-row.th-todo-dragging { opacity:.5; }
+  .th-todo-drag { flex:none; color:var(--th-dim); cursor:grab; font-size:14px;
+    line-height:1; padding:2px 4px; touch-action:none; }
+  .th-todo-check { flex:none; width:20px; height:20px; border-radius:5px; cursor:pointer;
+    background:none; border:1px solid var(--th-line); padding:0; }
+  .th-todo-check.on { background:var(--th-acc); border-color:var(--th-acc); }
+  .th-todo-check.on::after { content:'✓'; display:block; color:#141317; font-size:13px;
+    font-weight:700; line-height:18px; text-align:center; }
+  .th-todo-text { flex:1; min-width:0; overflow-wrap:break-word; }
+  .th-todo-row.done .th-todo-text { text-decoration:line-through; color:var(--th-dim); }
+  .th-todo-x { flex:none; background:none; border:none; color:var(--th-dim);
+    cursor:pointer; font-size:13px; padding:2px 4px; }
+  .th-todo-x:hover { color:var(--th-err); }
   /* ---- cooldown alert overlay + modal ---- */
   .th-cd-overlay { inset:0; background:transparent; pointer-events:none;
     z-index:2147483646; transition:background-color 120ms linear; }
@@ -4625,7 +4811,10 @@
         const opn = el('button', 'th-open', '›');
         opn.title = 'Open ' + f.name;
         opn.addEventListener('click', function () {
-          if (f.floatable) { openFloating(f.id); close(); }
+          // Floating windows stay independent of the main panel — leave it
+          // open so several floating windows can be opened one after
+          // another, or alongside the main panel, without it closing itself.
+          if (f.floatable) { openFloating(f.id); }
           else { tab = 'feature:' + f.id; render(); }
         });
         row.appendChild(opn);
@@ -5041,10 +5230,12 @@
     function render() {
       // Debug can be hidden while it is the active tab (e.g. after locking).
       if (tab === 'debug' && !devUnlocked) tab = 'features';
-      // A feature panel is only reachable while that feature is switched on.
+      // A feature's own screen is reachable any time it has one, on or off —
+      // so settings (like the market highlight thresholds) can be adjusted
+      // before ever switching the feature on.
       if (tab.indexOf('feature:') === 0) {
         const f = REGISTRY.get(tab.slice(8));
-        if (!f || !f.panel || !SETTINGS.isOn(f.id, f.defaultOn)) tab = 'features';
+        if (!f || !f.panel) tab = 'features';
       }
       renderRail();
       renderTabs();
@@ -5160,6 +5351,7 @@
         gym: GYM,
         inspect: INSPECT,
         watchlist: WATCHLIST,
+        todo: TODO,
         race: RACE,
         away: AWAY,
         icons: STATUS_ICONS,
