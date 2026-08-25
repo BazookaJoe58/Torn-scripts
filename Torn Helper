@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Helper
 // @namespace    cam.torn.tools
-// @version      0.7.4
+// @version      0.7.5
 // @description  All-in-one helper. Modular features with individual on/off toggles. Includes Cooldown Alerts (drug, booster, education, OC, racing). Works on Tampermonkey (PC) and Torn PDA (mobile).
 // @author       Cam
 // @updateURL    https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/refs/heads/main/Torn%20Helper
@@ -28,7 +28,8 @@
  *    SECTION 06  REGISTRY .......... feature lifecycle engine
  *    SECTION 07  FEATURE: COOLDOWN ALERTS
  *                07a  shared alert overlay + modal
- *                07b  status pill
+ *                07b  (removed — status pill; cooldowns show as a live value
+ *                      in the Features list now instead)
  *                07c  Torn's status icon strip (shared DOM reader)
  *                07d  racing detection (DOM only, no API)
  *                07e  cooldown core (API polling, timers, alerts)
@@ -66,7 +67,7 @@
   const CONFIG = {
     scriptName: 'Torn Helper',
     scriptShort: 'TH',
-    version: '0.7.4',
+    version: '0.7.5',
     logLevel: 'info',        // debug | info | warn | error | silent
     logBufferSize: 400,
     storageKeys: {
@@ -79,7 +80,19 @@
       // Where the floating TH button sits: { side:'left'|'right', y:pixels }
       launcherPos: 'th.launcher.pos.v1',
       // How far a press must move before it counts as a drag instead of a tap.
-      dragThresholdPx: 5
+      dragThresholdPx: 5,
+      // How tall the main panel is on narrow screens (percent of viewport height).
+      // Adjustable on the Settings tab — the default 80 is what it always was;
+      // this exists because on some phones that is most of the screen.
+      mobileHeightKey: 'th.ui.mobileheight.v1',
+      mobileHeightDefault: 80,
+      mobileHeightMin: 30,
+      mobileHeightMax: 95,
+      // Floating windows for features marked floatable:true (see REGISTRY).
+      // Position is remembered per feature under floatPosPrefix + featureId.
+      floatPosPrefix: 'th.float.pos.',
+      floatDefaultWidth: 320,
+      floatDefaultHeight: 420
     },
     maxFeatureErrors: 2,
     // ---- Developer access --------------------------------------------------
@@ -189,9 +202,7 @@
         ends: 'th.cd.ends.v1',
         snooze: 'th.cd.snooze.v1',
         state: 'th.cd.state.v1',
-        lastPoll: 'th.cd.lastpoll.v1',
-        pillPos: 'th.cd.pillpos.v1',
-        pillHidden: 'th.cd.pillhidden.v1'
+        lastPoll: 'th.cd.lastpoll.v1'
       }
     }
   };
@@ -545,6 +556,12 @@
         // features with real UI live inside this panel instead of adding more
         // floating boxes to the page.
         panel: typeof def.panel === 'function' ? def.panel : null,
+        // Only meaningful when panel is set. true = "Open" pops this feature
+        // into its own small draggable floating window instead of swapping
+        // the main panel body, so it can stay up while you scroll other
+        // pages. Used for tools you want alongside the game, not tools that
+        // only make sense on one page (those still swap into the main panel).
+        floatable: !!def.floatable,
         // Optional. Adjustable numbers shown in the info drawer:
         //   { key, label, unit, min, max, step, def }
         settings: Array.isArray(def.settings) ? def.settings : [],
@@ -837,68 +854,12 @@
       }
     };
   })();
-  /* ---- 07b — status pill -------------------------------------------------- */
-  const PILL = (function () {
-    let el = null, dragCleanup = null;
-    const ROWS = [
-      { key: 'drug',    label: 'Drug' },
-      { key: 'med',     label: 'Med' },
-      { key: 'booster', label: 'Booster' },
-      { key: 'edu',     label: 'Edu' },
-      { key: 'oc',      label: 'OC' },
-      { key: 'race',    label: 'Race' }
-    ];
-    function build() {
-      if (el) return;
-      if (PLATFORM.storage.get(CONFIG.cooldowns.storageKeys.pillHidden, false)) return;
-      el = document.createElement('div');
-      el.className = 'th-root th-cd-pill';
-      el.innerHTML =
-        '<div class="th-cd-pillhead"><span>Cooldowns</span>' +
-        '<button class="th-cd-pillhide" title="Hide">–</button></div>' +
-        '<div class="th-cd-pillrows"></div>';
-      document.body.appendChild(el);
-      el.querySelector('.th-cd-pillhide').addEventListener('click', function (e) {
-        e.stopPropagation();
-        PLATFORM.storage.set(CONFIG.cooldowns.storageKeys.pillHidden, true);
-        destroy();
-        LOG.info('pill hidden — bring it back with "Show pill" on the Debug tab');
-      });
-      const pos = PLATFORM.storage.get(CONFIG.cooldowns.storageKeys.pillPos, null);
-      if (pos) {
-        el.style.left = pos.x + 'px';
-        el.style.top = pos.y + 'px';
-        el.style.right = 'auto';
-        el.style.transform = 'none';
-      }
-      dragCleanup = UTIL.makeDraggable(el, el.querySelector('.th-cd-pillhead'), function (p) {
-        PLATFORM.storage.set(CONFIG.cooldowns.storageKeys.pillPos, p);
-      });
-      LOG.debug('pill built');
-    }
-    // values: { drug:'00:12:03', race:'not racing', ... } — missing keys hidden
-    function render(values) {
-      if (!el) return;
-      const box = el.querySelector('.th-cd-pillrows');
-      box.innerHTML = ROWS.filter(function (r) {
-        return Object.prototype.hasOwnProperty.call(values, r.key);
-      }).map(function (r) {
-        return '<div class="th-cd-pillrow"><span>' + r.label + '</span><span>' +
-               UTIL.escapeHtml(values[r.key]) + '</span></div>';
-      }).join('');
-    }
-    function destroy() {
-      if (dragCleanup) { dragCleanup(); dragCleanup = null; }
-      if (el) { el.remove(); el = null; }
-    }
-    return {
-      build: build,
-      render: render,
-      destroy: destroy,
-      unhide: function () { PLATFORM.storage.set(CONFIG.cooldowns.storageKeys.pillHidden, false); },
-      exists: function () { return !!el; }
-    };
-  })();
+  /* ---- 07b — status pill ----------------------------------------------------
+   * Removed by request — cooldown status is shown only as the live value next
+   * to each toggle in the main Features list now, same as every other
+   * feature. Cooldowns alert a different way (the overlay/modal), so a
+   * separate always-on floating readout was not needed.
+   * ------------------------------------------------------------------------ */
   /* ---- 07c — Torn's status icon strip ------------------------------------
    *
    * Confirmed from a live page capture (2026-08-23). Every status icon sits in
@@ -1459,13 +1420,11 @@
                     : '?';
       }
       lastValues = values;
-      PILL.render(values);
     }
     /* ---- lifecycle ---- */
     function startShared() {
       if (running) return;
       running = true;
-      PILL.build();
       tickTimer = setInterval(function () { LOG.guard('cd.tick', tick); }, CC.tickMs);
       pollTimer = setInterval(function () { poll(false); }, CC.pollMs);
       raceTimer = setInterval(function () { LOG.guard('cd.scanIcons', scanIcons); }, CC.iconScanMs);
@@ -1488,7 +1447,6 @@
       clearTimeout(pollRequest); pollRequest = null;
       document.removeEventListener('visibilitychange', onVisible);
       ALERT_UI.destroy();
-      PILL.destroy();
       lastValues = {};
       LOG.info('cooldown core stopped');
     }
@@ -1555,8 +1513,7 @@
             delete st._boosterLatched; delete st.ocReadyFlagged;
             saveState();
             LOG.info('one-shot alert latches cleared');
-          } },
-        { label: 'Show pill',         run: function () { PILL.unhide(); PILL.build(); tick(); } }
+          } }
       ],
       text: function () {
         return 'active:    ' + JSON.stringify(active) + '\n' +
@@ -2172,6 +2129,9 @@
     needsApiKey: true,
     apiAccess: 'Public',
     apiSelections: ['profile'],
+    // Floats so it can stay open while you scroll other pages hunting
+    // mugs/targets, instead of taking over the main panel.
+    floatable: true,
     settings: [
       { key: 'alertMin', label: 'Alert before release', unit: 'minutes',
         min: 1, max: 60, step: 1, def: 5 }
@@ -4013,6 +3973,9 @@
     needsApiKey: false,
     apiAccess: null,
     apiSelections: [],
+    // Floats so you can keep picking elements and reading captures while
+    // navigating around the site, instead of it taking over the main panel.
+    floatable: true,
     liveValue: function () { return INSPECT.summary(); },
     panel: INSPECT.renderPanel,
     init: function () { return INSPECT.start(); }
@@ -4071,7 +4034,10 @@
     background:var(--th-bg); color:var(--th-fg); border-left:1px solid var(--th-line);
     display:flex; flex-direction:column; font-size:12px; line-height:1.45; }
   @media (max-width:${CONFIG.ui.mobileBreakpoint}px) {
-    .th-panel { top:auto; left:0; right:0; bottom:0; width:100%; height:80vh;
+    /* height comes from --th-mobile-h, set inline from the saved "Panel height
+       on phones" setting (Settings tab) — 80vh is only the fallback if that
+       has never been set. */
+    .th-panel { top:auto; left:0; right:0; bottom:0; width:100%; height:var(--th-mobile-h, 80vh);
       border-left:none; border-top:1px solid var(--th-line); border-radius:14px 14px 0 0; }
   }
   .th-head { display:flex; align-items:center; gap:8px; padding:11px 12px; border-bottom:1px solid var(--th-line); }
@@ -4303,18 +4269,25 @@
     font-weight:400; font-size:11px; padding:9px 12px; }
   .th-cd-mbtn.danger[data-armed="1"] { color:var(--th-err); border-color:var(--th-err); font-weight:700; }
   .th-cd-mrow + .th-cd-mrow { margin-top:8px; }
-  /* ---- cooldown pill ---- */
-  .th-cd-pill { right:0; top:38%; min-width:170px; border-radius:10px 0 0 10px;
-    background:rgba(20,19,23,.86); color:var(--th-fg); border:1px solid var(--th-line);
-    z-index:2147482900; font-size:11px; user-select:none; }
-  .th-cd-pillhead { display:flex; align-items:center; justify-content:space-between;
-    padding:5px 8px; cursor:move; background:rgba(255,255,255,.05); border-radius:10px 0 0 0;
-    color:var(--th-dim); font-size:10px; text-transform:uppercase; letter-spacing:.7px; }
-  .th-cd-pillhide { background:none; border:none; color:var(--th-dim); cursor:pointer;
-    font-size:15px; line-height:1; padding:0 2px; }
-  .th-cd-pillrows { padding:6px 8px 8px; display:grid; gap:3px; }
-  .th-cd-pillrow { display:flex; justify-content:space-between; gap:12px; font-variant-numeric:tabular-nums; }
-  .th-cd-pillrow span:first-child { color:var(--th-dim); }
+  /* ---- floating feature windows ----
+   * Used by features registered with floatable:true (currently the hospital
+   * watchlist and the page inspector) — a small draggable window instead of
+   * the main panel body, so it can stay open while you scroll other pages.
+   */
+  .th-floatwin { min-width:260px; width:${CONFIG.ui.floatDefaultWidth}px; max-width:94vw;
+    max-height:80vh; display:flex; flex-direction:column; border-radius:10px;
+    background:var(--th-bg); color:var(--th-fg); border:1px solid var(--th-line);
+    box-shadow:0 8px 28px rgba(0,0,0,.55); z-index:2147482800; font-size:12px; }
+  .th-floatwin-head { display:flex; align-items:center; gap:8px; padding:8px 10px;
+    cursor:move; background:var(--th-bg2); border-radius:10px 10px 0 0;
+    border-bottom:1px solid var(--th-line); user-select:none; }
+  .th-floatwin-head span { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; color:var(--th-acc); font-size:11px; text-transform:uppercase;
+    letter-spacing:.6px; }
+  .th-floatwin-x { flex:none; background:none; border:none; color:var(--th-dim);
+    font-size:18px; line-height:1; cursor:pointer; padding:0 2px; }
+  .th-floatwin-x:hover { color:var(--th-err); }
+  .th-floatwin-body { flex:1; overflow:auto; -webkit-overflow-scrolling:touch; }
   `;
   /* ==========================================================================
    * SECTION 15 — UI
@@ -4384,6 +4357,65 @@
       if (cls) e.className = cls;
       if (html !== undefined) e.innerHTML = html;
       return e;
+    }
+    // Reads the saved "Panel height on phones" setting and applies it to the
+    // panel via a CSS variable. Safe to call before the panel exists.
+    function applyMobileHeight() {
+      if (!panel) return;
+      const raw = Number(PLATFORM.storage.get(CONFIG.ui.mobileHeightKey, CONFIG.ui.mobileHeightDefault));
+      const safe = (isFinite(raw) && raw >= CONFIG.ui.mobileHeightMin && raw <= CONFIG.ui.mobileHeightMax)
+        ? raw : CONFIG.ui.mobileHeightDefault;
+      panel.style.setProperty('--th-mobile-h', safe + 'vh');
+    }
+    /* ---- floating feature windows ----
+     * Features registered with floatable:true (currently the hospital
+     * watchlist and the page inspector) get their own small draggable window
+     * instead of taking over the main panel, so they can stay open while you
+     * scroll the rest of the site. Opening one closes the main panel; the
+     * launcher button still brings that back at any time.
+     */
+    const floatWins = {};   // featureId -> { el, dragCleanup }
+    function floatPosKey(id) { return CONFIG.ui.floatPosPrefix + id; }
+    function closeFloating(id) {
+      const w = floatWins[id];
+      if (!w) return;
+      if (w.dragCleanup) w.dragCleanup();
+      w.el.remove();
+      delete floatWins[id];
+      LOG.debug('closed floating window:', id);
+    }
+    function openFloating(id) {
+      const f = REGISTRY.get(id);
+      if (!f || !f.panel) { LOG.warn('openFloating: no such panel feature:', id); return; }
+      if (floatWins[id]) { floatWins[id].el.style.display = 'flex'; return; }   // already open
+      const win = el('div', 'th-root th-floatwin');
+      win.style.display = 'flex';
+      const head = el('div', 'th-floatwin-head', '<span>' + UTIL.escapeHtml(f.name) + '</span>');
+      const xBtn = el('button', 'th-floatwin-x', '×');
+      xBtn.title = 'Close';
+      xBtn.addEventListener('click', function () { closeFloating(id); });
+      head.appendChild(xBtn);
+      win.appendChild(head);
+      const body = el('div', 'th-floatwin-body');
+      win.appendChild(body);
+      document.body.appendChild(win);
+      const saved = PLATFORM.storage.get(floatPosKey(id), null);
+      if (saved) {
+        win.style.left = saved.x + 'px';
+        win.style.top = saved.y + 'px';
+      } else {
+        // Stagger new windows so opening several in a row does not stack them
+        // exactly on top of each other.
+        const n = Object.keys(floatWins).length;
+        win.style.left = Math.min(window.innerWidth - 60, 16 + n * 24) + 'px';
+        win.style.top = Math.min(window.innerHeight - 60, 16 + n * 24) + 'px';
+      }
+      const dragCleanup = UTIL.makeDraggable(win, head, function (p) {
+        PLATFORM.storage.set(floatPosKey(id), { x: p.x, y: p.y });
+      });
+      floatWins[id] = { el: win, dragCleanup: dragCleanup };
+      LOG.guard('render.floatPanel.' + id, function () { f.panel(body); });
+      LOG.info('opened floating window:', id);
     }
     /* ---- launcher: draggable, snaps to whichever side is nearest ----
      * A press that stays put opens the panel. A press that moves more than a
@@ -4585,11 +4617,17 @@
         : 'What does this do?';
       info.addEventListener('click', function () { openInfo[f.id] = !openInfo[f.id]; render(); });
       row.appendChild(info);
-      // Features with their own screen get a way into it.
+      // Features with their own screen get a way into it. Floatable ones pop
+      // into their own draggable window (and close the main panel, so the
+      // window is not stuck behind it); everything else swaps into the main
+      // panel body as before.
       if (f.panel) {
         const opn = el('button', 'th-open', '›');
         opn.title = 'Open ' + f.name;
-        opn.addEventListener('click', function () { tab = 'feature:' + f.id; render(); });
+        opn.addEventListener('click', function () {
+          if (f.floatable) { openFloating(f.id); close(); }
+          else { tab = 'feature:' + f.id; render(); }
+        });
         row.appendChild(opn);
       }
       const sw = el('button', 'th-sw' + (on ? ' on' : ''));
@@ -4737,6 +4775,20 @@
         h += '<p class="th-p" style="color:var(--th-err)">Torn rejected your key for: ' +
              UTIL.escapeHtml(rejected.map(function (f) { return f.name; }).join(', ')) +
              '. Those need a higher access level than labelled.</p>';
+      }
+      h += '<div class="th-h4">Display</div>';
+      {
+        const mhVal = Number(PLATFORM.storage.get(CONFIG.ui.mobileHeightKey, CONFIG.ui.mobileHeightDefault));
+        h += '<div class="th-set">' +
+             '<label for="th-mobileh">Panel height on phones</label>' +
+             '<input id="th-mobileh" class="th-setnum" type="number" inputmode="numeric" ' +
+             'min="' + CONFIG.ui.mobileHeightMin + '" max="' + CONFIG.ui.mobileHeightMax + '" step="5" ' +
+             'value="' + mhVal + '">' +
+             '<span class="th-setunit">%</span>' +
+             '</div>' +
+             '<p class="th-p">How much of the screen the main panel covers on narrow screens ' +
+             '(phones, Torn PDA) — 80% by default. Does not change anything on the wider PC ' +
+             'layout.</p>';
       }
       h += '<div class="th-h4">Backup</div>';
       h += '<p class="th-p">Copy this to move your toggles to another device.</p>';
@@ -5028,12 +5080,27 @@
           render();
         });
       });
+      // Mobile panel height (Settings tab). Not a per-feature setting, so it
+      // is not covered by the [data-set] loop above.
+      const mh = bodyEl.querySelector('#th-mobileh');
+      if (mh) {
+        mh.addEventListener('change', function () {
+          let v = Number(mh.value);
+          if (!isFinite(v)) v = CONFIG.ui.mobileHeightDefault;
+          v = Math.max(CONFIG.ui.mobileHeightMin, Math.min(CONFIG.ui.mobileHeightMax, v));
+          PLATFORM.storage.set(CONFIG.ui.mobileHeightKey, v);
+          mh.value = v;
+          applyMobileHeight();
+          LOG.info('mobile panel height set to', v + '%');
+        });
+      }
     }
     return {
       init: function () {
         injectStyles();
         buildPanel();
         buildLauncher();
+        applyMobileHeight();
         renderRail();
         setInterval(function () { tickLiveValues(); }, 1000);
         LOG.info('UI ready');
@@ -5041,8 +5108,11 @@
       open: open,
       close: close,
       // Jump straight back into a feature's own screen, used by the inspector
-      // after picking an element with the panel closed.
+      // after picking an element with the panel closed. Floatable features
+      // reopen their floating window instead of the main panel.
       openFeature: function (id) {
+        const f = REGISTRY.get(id);
+        if (f && f.floatable) { openFloating(id); return; }
         tab = 'feature:' + id;
         open();
       },
