@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Helper
 // @namespace    cam.torn.tools
-// @version      77
+// @version      78
 // @description  All-in-one helper. Modular features with individual on/off toggles. Includes Cooldown Alerts (drug, booster, education, OC, racing). Works on Tampermonkey (PC) and Torn PDA (mobile).
 // @author       Cam
 // @updateURL    https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/refs/heads/main/Torn%20Helper
@@ -69,7 +69,7 @@
   const CONFIG = {
     scriptName: 'Torn Helper',
     scriptShort: 'TH',
-    version: '77',
+    version: '78',
     logLevel: 'info',        // debug | info | warn | error | silent
     logBufferSize: 400,
     storageKeys: {
@@ -731,6 +731,39 @@
   })();
   // Features can push debug tools here; the Debug tab renders them.
   const DEBUG_PANELS = [];
+  /* ==========================================================================
+   * SECTION 06b — SOUND (shared notification sound library)
+   *
+   * A small reusable wrapper around <audio> so any feature can loop or stop a
+   * named sound without managing its own Audio object. Built for the trade
+   * cash-threshold alert (SECTION 11b, adapted from the GhostWarning
+   * userscript), but nothing here is specific to that — any future alert can
+   * call SOUND.loop('some-id', url) the same way.
+   * ======================================================================== */
+  const SOUND = (function () {
+    const players = {};   // id -> HTMLAudioElement
+    function get(id, url) {
+      if (!players[id] || players[id].src.indexOf(url) === -1) {
+        players[id] = new Audio(url);
+      }
+      return players[id];
+    }
+    function loop(id, url, volume) {
+      const a = get(id, url);
+      a.loop = true;
+      a.volume = (typeof volume === 'number') ? volume : 0.65;
+      a.play().catch(function (e) { LOG.debug('sound: play blocked for', id, '-', e.message); });
+    }
+    function stop(id) {
+      const a = players[id];
+      if (!a) return;
+      a.pause();
+      a.currentTime = 0;
+    }
+    function stopAll() { Object.keys(players).forEach(stop); }
+    function isPlaying(id) { const a = players[id]; return !!(a && !a.paused); }
+    return { loop: loop, stop: stop, stopAll: stopAll, isPlaying: isPlaying };
+  })();
   /* ==========================================================================
    * SECTION 07 — FEATURE: COOLDOWN ALERTS
    *
@@ -3276,6 +3309,266 @@
     init: function () { return GYM.start(); }
   });
   /* ==========================================================================
+   * SECTION 11b — FEATURE: TRADE (cash alert + money helper)
+   *
+   * Adapted from "SAShapeShifter-GhostWarning" (swervelord + SAShapeShifter +
+   * Grok), the source of which Cam supplied directly (2026-08-25). Two
+   * independent pieces, kept as two toggles the same way the original had
+   * two independent behaviors bolted together:
+   *
+   *   TRADE_ALERT — watches your own cash (#user-money) while on the trade
+   *   page; over the threshold, the Change button glows gold and a looping
+   *   chirp plays via the shared SOUND library above. Kept the original's
+   *   button-glow-and-chirp style rather than the cooldown-alert flash+modal
+   *   — confirmed with Cam that this is intentionally less intrusive, since
+   *   it is something you are actively looking at mid-trade, not a full
+   *   interrupt like "your OC is ready."
+   *
+   *   TRADE_MONEY — quick-subtract buttons (-100k … -1b, Custom, Paste) next
+   *   to your own money-offer input, PLUS the original's auto-fill: on load
+   *   the input is set to your wallet cash, and it stays in sync (preserving
+   *   whatever you have subtracted) if your wallet balance changes while the
+   *   trade is open. Confirmed with Cam to keep this — it only ever writes a
+   *   number into a form field on the page; nothing is sent to Torn until
+   *   you press Torn's own Send/Change button yourself, same as everything
+   *   else in Torn Helper.
+   *
+   * Selectors below (#user-money, .money-value, .user-id.input-money, the
+   * Change button's three fallback selectors, .input-money-group) are taken
+   * verbatim from the working GhostWarning source, not guessed.
+   * ======================================================================== */
+  const TRADE_ALERT = (function () {
+    const CHIRP_URL = 'https://www.torn.com/js/chat/sounds/Chirp_1.mp3';
+    const SOUND_ID = 'trade-cashalert';
+    let timer = null, glowing = false, lastMoney = null;
+    function currentMoney() {
+      const elx = document.getElementById('user-money');
+      if (!elx) return null;
+      const dataMoney = elx.getAttribute('data-money');
+      if (dataMoney) return parseInt(dataMoney, 10) || 0;
+      return parseInt((elx.textContent || '').replace(/[^0-9]/g, ''), 10) || 0;
+    }
+    function changeButton() {
+      return document.querySelector('input[type="submit"][value="Change"]') ||
+             document.querySelector('input.torn-btn[value="Change"]') ||
+             document.querySelector('.btn-wrap.silver input[value="Change"]') ||
+             null;
+    }
+    function threshold() {
+      const v = Number(SETTINGS.getVal('trade-cashalert', 'threshold', 1000000));
+      return (isFinite(v) && v > 0) ? v : 1000000;
+    }
+    function update() {
+      const money = currentMoney();
+      lastMoney = money;
+      if (money === null) return;
+      const btn = changeButton();
+      if (money > threshold()) {
+        if (btn) btn.classList.add('th-trade-glow');
+        if (!glowing) { SOUND.loop(SOUND_ID, CHIRP_URL, 0.65); glowing = true; }
+      } else {
+        if (btn) btn.classList.remove('th-trade-glow');
+        if (glowing) { SOUND.stop(SOUND_ID); glowing = false; }
+      }
+    }
+    function start() {
+      timer = setInterval(function () { LOG.guard('trade.alert.update', update); }, 800);
+      update();
+      LOG.info('trade cash alert active, threshold', threshold());
+      return function cleanup() {
+        clearInterval(timer); timer = null;
+        const btn = changeButton();
+        if (btn) btn.classList.remove('th-trade-glow');
+        if (glowing) { SOUND.stop(SOUND_ID); glowing = false; }
+        LOG.info('trade cash alert stopped');
+      };
+    }
+    return {
+      start: start,
+      liveValue: function () { return lastMoney === null ? null : '$' + lastMoney.toLocaleString(); },
+      debugText: function () {
+        return 'TRADE CASH ALERT\n' +
+               '#user-money found: ' + !!document.getElementById('user-money') + '\n' +
+               'current money: ' + currentMoney() + '\n' +
+               'threshold: ' + threshold() + '\n' +
+               'change button found: ' + !!changeButton() + '\n' +
+               'glowing: ' + glowing + '\n' +
+               'sound playing: ' + SOUND.isPlaying(SOUND_ID);
+      }
+    };
+  })();
+  const TRADE_MONEY = (function () {
+    const formatNumber = function (n) { return n.toLocaleString('en-US'); };
+    const parseNumber = function (str) { return parseInt(String(str).replace(/[^0-9]/g, ''), 10) || 0; };
+    const SUBTRACT_BUTTONS = [
+      ['-100k', -100000], ['-500k', -500000], ['-1m', -1000000],
+      ['-5m', -5000000], ['-10m', -10000000], ['-100m', -100000000],
+      ['-1b', -1000000000]
+    ];
+    let observer = null, pollTimer = null, syncFn = null;
+    function tradePageCash() {
+      const elx = document.querySelector('.money-value');
+      return elx ? parseInt((elx.textContent || '').replace(/[^0-9]/g, ''), 10) : 0;
+    }
+    function setInputValue(input, numValue) {
+      input.value = formatNumber(numValue);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    function insertButtons(input) {
+      if (document.getElementById('th-trade-money-buttons')) return;
+      const container = document.createElement('div');
+      container.id = 'th-trade-money-buttons';
+      container.className = 'th-root th-trade-container';
+      container.style.position = 'static';
+      SUBTRACT_BUTTONS.forEach(function (pair) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'th-btn';
+        btn.textContent = pair[0];
+        btn.addEventListener('click', function () {
+          const current = parseNumber(input.value);
+          setInputValue(input, Math.max(0, current + pair[1]));
+          if (syncFn) syncFn();
+        });
+        container.appendChild(btn);
+      });
+      const custom = document.createElement('button');
+      custom.type = 'button';
+      custom.className = 'th-btn';
+      custom.textContent = 'Custom';
+      custom.addEventListener('click', function () {
+        const val = prompt('Enter amount to subtract:');
+        if (!val) return;
+        const current = parseNumber(input.value);
+        setInputValue(input, Math.max(0, current - parseNumber(val)));
+        if (syncFn) syncFn();
+      });
+      container.appendChild(custom);
+      const paste = document.createElement('button');
+      paste.type = 'button';
+      paste.className = 'th-btn';
+      paste.textContent = 'Paste';
+      paste.addEventListener('click', function () {
+        if (!navigator.clipboard || !navigator.clipboard.readText) {
+          alert('Clipboard access is not available.');
+          return;
+        }
+        navigator.clipboard.readText().then(function (text) {
+          setInputValue(input, parseNumber(text));
+          if (syncFn) syncFn();
+        }).catch(function () { alert('Clipboard access denied.'); });
+      });
+      container.appendChild(paste);
+      const moneyGroup = input.closest('.input-money-group');
+      if (moneyGroup) moneyGroup.after(container);
+      else input.parentElement.appendChild(container);
+    }
+    // Auto-fills the input with your wallet cash on load, then keeps it in
+    // sync (preserving whatever you have manually subtracted) if your wallet
+    // balance changes while the trade is open — e.g. you get paid mid-trade.
+    function observeTradeCash(input) {
+      let lastWallet = tradePageCash();
+      let lastInput = parseNumber(input.value);
+      const sync = function () {
+        lastWallet = tradePageCash();
+        lastInput = parseNumber(input.value);
+      };
+      const applyNewValue = function () {
+        const newWallet = tradePageCash();
+        if (newWallet === lastWallet) return;
+        const delta = lastInput - lastWallet;
+        const newValue = Math.max(0, newWallet + delta);
+        setInputValue(input, newValue);
+        lastWallet = newWallet;
+        lastInput = newValue;
+      };
+      const node = document.querySelector('.money-value');
+      if (node) {
+        const mo = new MutationObserver(function () { LOG.guard('trade.money.cashChange', applyNewValue); });
+        mo.observe(node, { childList: true, characterData: true, subtree: true });
+      }
+      pollTimer = setInterval(function () { LOG.guard('trade.money.poll', applyNewValue); }, 500);
+      return sync;
+    }
+    function startTrade(input) {
+      const wallet = tradePageCash();
+      const current = parseNumber(input.value);
+      setInputValue(input, wallet + current);
+      syncFn = observeTradeCash(input);
+      insertButtons(input);
+      syncFn();
+      LOG.info('trade money helper attached');
+    }
+    function start() {
+      let started = false;
+      function check() {
+        if (started) return;
+        const inputs = document.querySelectorAll('.user-id.input-money');
+        // The original waited for exactly 2 (your side + theirs) before
+        // touching anything, so the page is fully rendered first.
+        if (inputs.length !== 2) return;
+        started = true;
+        startTrade(inputs[0]);
+      }
+      observer = new MutationObserver(function () { LOG.guard('trade.money.check', check); });
+      observer.observe(document.body, { childList: true, subtree: true });
+      check();
+      return function cleanup() {
+        if (observer) { observer.disconnect(); observer = null; }
+        clearInterval(pollTimer); pollTimer = null;
+        const box = document.getElementById('th-trade-money-buttons');
+        if (box) box.remove();
+        started = false;
+        syncFn = null;
+        LOG.info('trade money helper stopped');
+      };
+    }
+    return { start: start };
+  })();
+  DEBUG_PANELS.push({
+    title: 'Trade',
+    buttons: [
+      { label: 'Dump cash alert state', copy: function () { return TRADE_ALERT.debugText(); } }
+    ]
+  });
+  REGISTRY.register({
+    id: 'trade-cashalert',
+    name: 'Cash threshold alert',
+    category: 'Trade',
+    info: 'While on the trade page, glows the Change button gold and loops a chirp ' +
+          'whenever your own cash goes over the threshold below — same behaviour as the ' +
+          'GhostWarning script this was adapted from. Turning this feature off is the ' +
+          'mute switch; there is no separate mute setting.',
+    match: /trade\.php/i,
+    defaultOn: false,
+    needsApiKey: false,
+    apiAccess: null,
+    apiSelections: [],
+    settings: [
+      { key: 'threshold', label: 'Alert when cash over', unit: '$',
+        min: 0, max: 999999999999, step: 100000, def: 1000000 }
+    ],
+    liveValue: function () { return TRADE_ALERT.liveValue(); },
+    init: function () { return TRADE_ALERT.start(); }
+  });
+  REGISTRY.register({
+    id: 'trade-moneyhelper',
+    name: 'Trade money helper',
+    category: 'Trade',
+    info: 'On the trade page, adds quick-subtract buttons (-100k through -1b), a Custom ' +
+          'amount, and Paste from clipboard, next to your own money offer. Also auto-' +
+          'fills that field with your wallet cash when the trade opens and keeps it in ' +
+          'sync (preserving whatever you have subtracted) if your wallet balance changes ' +
+          'while the trade is open — this only ever changes what is typed into the box; ' +
+          'nothing is sent until you press Torn\'s own Send/Change button.',
+    match: /trade\.php/i,
+    defaultOn: false,
+    needsApiKey: false,
+    apiAccess: null,
+    apiSelections: [],
+    init: function () { return TRADE_MONEY.start(); }
+  });
+  /* ==========================================================================
    * SECTION 12 — FEATURE: PAGE INSPECTOR (developer)
    *
    * The Torn Page Inspector, folded in as a feature. It collects the things
@@ -4715,6 +5008,20 @@
     font-size:18px; line-height:1; cursor:pointer; padding:0 2px; }
   .th-floatwin-x:hover { color:var(--th-err); }
   .th-floatwin-body { flex:1; overflow:auto; -webkit-overflow-scrolling:touch; }
+  /* ---- trade helper ----
+   * .th-trade-glow is toggled on Torn's own "Change" button when the trade
+   * cash offer crosses your alert threshold (SECTION 11b TRADE_ALERT).
+   * .th-trade-container holds the quick-subtract buttons injected next to
+   * the trade money input (SECTION 11b TRADE_MONEY).
+   */
+  @keyframes th-trade-pulse {
+    0%   { box-shadow:0 0 15px #ff0, 0 0 30px #ff0; }
+    50%  { box-shadow:0 0 25px #ff0, 0 0 45px #ff0; }
+    100% { box-shadow:0 0 15px #ff0, 0 0 30px #ff0; }
+  }
+  .th-trade-glow { animation:th-trade-pulse 1.1s ease-in-out infinite; }
+  .th-trade-container { position:static !important; display:flex; flex-wrap:wrap;
+    gap:6px; margin:6px 0; align-items:center; }
   `;
   /* ==========================================================================
    * SECTION 15 — UI
@@ -5594,6 +5901,9 @@
         watchlist: WATCHLIST,
         todo: TODO,
         company: COMPANY,
+        tradeAlert: TRADE_ALERT,
+        tradeMoney: TRADE_MONEY,
+        sound: SOUND,
         race: RACE,
         away: AWAY,
         icons: STATUS_ICONS,
