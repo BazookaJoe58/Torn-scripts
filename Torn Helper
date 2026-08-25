@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Helper
 // @namespace    cam.torn.tools
-// @version      0.7.6
+// @version      77
 // @description  All-in-one helper. Modular features with individual on/off toggles. Includes Cooldown Alerts (drug, booster, education, OC, racing). Works on Tampermonkey (PC) and Torn PDA (mobile).
 // @author       Cam
 // @updateURL    https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/refs/heads/main/Torn%20Helper
@@ -40,6 +40,7 @@
  *    SECTION 11  FEATURE: GYM (stat balancer)
  *    SECTION 12  FEATURE: PAGE INSPECTOR (developer)
  *    SECTION 12b FEATURE: GENERAL (to-do list)
+ *    SECTION 12c FEATURE: COMPANY (applications + departures)
  *    SECTION 13  FEATURE: placeholders
  *    SECTION 14  STYLES
  *    SECTION 15  UI
@@ -68,7 +69,7 @@
   const CONFIG = {
     scriptName: 'Torn Helper',
     scriptShort: 'TH',
-    version: '0.7.6',
+    version: '77',
     logLevel: 'info',        // debug | info | warn | error | silent
     logBufferSize: 400,
     storageKeys: {
@@ -185,6 +186,19 @@
       storageKeys: {
         ids: 'th.wl.ids.v1',
         companies: 'th.wl.companies.v1'
+      }
+    },
+    // ---- Company alerts tunables -------------------------------------------
+    // New applications and departures, detected by diffing IDs between polls
+    // (see SECTION 12c) rather than trusting any particular status string —
+    // the one real capture on file only showed already-resolved applications
+    // (withdrawn/accepted), never a live pending one, so a newly-appeared
+    // application ID is treated as "someone applied" regardless of status.
+    company: {
+      pollMinDefault: 5,   // minutes between polls, adjustable per-toggle
+      storageKeys: {
+        knownApps: 'th.co.apps.v1',
+        knownEmployees: 'th.co.emp.v1'
       }
     },
     // ---- Cooldown Alerts tunables -----------------------------------------
@@ -831,6 +845,14 @@
       // Reset the off button in case it was left armed by a previous alert.
       const offBtn = modalWrap.querySelector('[data-cd="off"]');
       if (offBtn) { offBtn.dataset.armed = ''; offBtn.textContent = 'Turn this alert off'; }
+      // Some alerts (company applications/departures) are one-shot by nature
+      // — the underlying state already stops them repeating, so a snooze
+      // makes no sense and just clutters the modal. ctx.hideSnooze hides it;
+      // ctx.ackLabel overrides the default "(1h)" wording for those cases.
+      const snoozeBtn = modalWrap.querySelector('[data-cd="snooze"]');
+      if (snoozeBtn) snoozeBtn.style.display = (ctx && ctx.hideSnooze) ? 'none' : '';
+      const ackBtn = modalWrap.querySelector('[data-cd="ack"]');
+      if (ackBtn) ackBtn.textContent = (ctx && ctx.ackLabel) ? ctx.ackLabel : 'Acknowledge (1h)';
       modalWrap.querySelector('.th-cd-mtitle').textContent = heading || 'Attention';
       modalWrap.querySelector('.th-cd-mwhy').textContent = reason || '';
       modalWrap.style.display = 'flex';
@@ -4151,6 +4173,225 @@
     init: function () { return TODO.start(); }
   });
   /* ==========================================================================
+   * SECTION 12c — FEATURE: COMPANY (applications + departures)
+   *
+   * Two toggles sharing one poller, same shape as the cooldown alerts: one
+   * shared core, alerts raised through the same ALERT_UI. Unlike cooldowns,
+   * these are pure events — a new applicant, someone gone from the roster —
+   * detected by diffing IDs between polls, not by any status string. Real
+   * shape confirmed 2026-08-25 via `company/?selections=applications,profile`
+   * (Cam is Director; that access level was confirmed working for this key).
+   *
+   * Acknowledge-only by design: the diff logic itself is what stops an alert
+   * repeating (the id is no longer "new" on the next poll), so there is
+   * nothing for a snooze to do — hence hideSnooze on both alerts below.
+   * ======================================================================== */
+  const COMPANY = (function () {
+    const CC = CONFIG.company;
+    const SK = CC.storageKeys;
+    const active = {};   // apply / leave
+    let running = false, pollTimer = null, lastPollAt = 0;
+    // null = never polled yet, so the very first poll only takes a baseline
+    // and never alerts — otherwise every application/employee that already
+    // existed before the feature was ever turned on would "look new" the
+    // first time and fire a wall of alerts.
+    let knownApps = PLATFORM.storage.get(SK.knownApps, null);           // [id, id, ...]
+    let knownEmployees = PLATFORM.storage.get(SK.knownEmployees, null); // { id: name, ... }
+    let lastStats = { pendingKnown: null, hired: null, capacity: null, lastPollAt: null };
+    function saveApps() { PLATFORM.storage.set(SK.knownApps, knownApps); }
+    function saveEmployees() { PLATFORM.storage.set(SK.knownEmployees, knownEmployees); }
+    function pollMinFor(featureId) {
+      const v = Number(SETTINGS.getVal(featureId, 'pollMin', CC.pollMinDefault));
+      return (isFinite(v) && v > 0) ? v : CC.pollMinDefault;
+    }
+    // Whichever active toggle wants the tighter interval wins.
+    function pollMs() {
+      let mins = null;
+      if (active.apply) mins = pollMinFor('co-apply');
+      if (active.leave) mins = (mins === null) ? pollMinFor('co-leave') : Math.min(mins, pollMinFor('co-leave'));
+      if (mins === null) mins = CC.pollMinDefault;
+      return mins * 60000;
+    }
+    function raiseApply(names) {
+      const list = names.join(', ');
+      ALERT_UI.show('company-apply', 'rgba(94,230,168,0.5)', 'New company application',
+        (names.length > 1 ? names.length + ' new applicants: ' : 'New applicant: ') + list,
+        { url: 'https://www.torn.com/companies.php?step=your&type=1#/option=applications',
+          label: 'Open applications' },
+        { featureId: 'co-apply', hideSnooze: true, ackLabel: 'Acknowledge',
+          onAck: function () {} });
+    }
+    function raiseLeave(names) {
+      const list = names.join(', ');
+      ALERT_UI.show('company-leave', 'rgba(255,107,107,0.5)', 'Employee left the company',
+        (names.length > 1 ? names.length + ' people left: ' : list + ' left the company'),
+        { url: 'https://www.torn.com/companies.php?step=your&type=1#/option=employees',
+          label: 'Open employees' },
+        { featureId: 'co-leave', hideSnooze: true, ackLabel: 'Acknowledge',
+          onAck: function () {} });
+    }
+    function handleData(data) {
+      const apps = data.applications || {};
+      const employees = (data.company && data.company.employees) || {};
+      const appIds = Object.keys(apps);
+      const empMap = {};
+      Object.keys(employees).forEach(function (id) { empMap[id] = employees[id].name; });
+      if (knownApps === null) {
+        knownApps = appIds.slice();
+        saveApps();
+        LOG.info('company: applications baseline set,', appIds.length, 'known — will not alert for these');
+      } else {
+        const fresh = appIds.filter(function (id) { return knownApps.indexOf(id) === -1; });
+        if (fresh.length && active.apply) {
+          raiseApply(fresh.map(function (id) { return apps[id].name || ('#' + (apps[id].userID || id)); }));
+        }
+        knownApps = appIds.slice();
+        saveApps();
+      }
+      if (knownEmployees === null) {
+        knownEmployees = empMap;
+        saveEmployees();
+        LOG.info('company: employee baseline set,', Object.keys(empMap).length, 'known — will not alert for these');
+      } else {
+        const gone = Object.keys(knownEmployees).filter(function (id) { return !(id in empMap); });
+        if (gone.length && active.leave) {
+          raiseLeave(gone.map(function (id) { return knownEmployees[id]; }));
+        }
+        knownEmployees = empMap;
+        saveEmployees();
+      }
+      lastStats = {
+        pendingKnown: appIds.length,
+        hired: data.company ? data.company.employees_hired : null,
+        capacity: data.company ? data.company.employees_capacity : null,
+        lastPollAt: Date.now()
+      };
+    }
+    function poll(force) {
+      const key = PLATFORM.apiKey();
+      if (!key) { LOG.warn('company poll skipped: no API key'); return Promise.resolve(); }
+      if (!force && Date.now() - lastPollAt < pollMs()) return Promise.resolve();
+      lastPollAt = Date.now();
+      const url = 'https://api.torn.com/company/?selections=applications,profile&key=' + encodeURIComponent(key);
+      LOG.info('company: polling', UTIL.redact(url));
+      return PLATFORM.getJSON(url).then(handleData).catch(function (e) {
+        LOG.error('company poll failed:', e.message);
+        if (/error 16/i.test(e.message)) {
+          if (active.apply) REGISTRY.flagAccessTooLow('co-apply');
+          if (active.leave) REGISTRY.flagAccessTooLow('co-leave');
+        }
+      });
+    }
+    function anyActive() { return !!(active.apply || active.leave); }
+    function startShared() {
+      if (running) return;
+      running = true;
+      // Checks once a minute whether a poll is actually due, since pollMs()
+      // is user-adjustable and can change while running.
+      pollTimer = setInterval(function () { poll(false); }, 60000);
+      poll(false);
+      LOG.info('company alerts started');
+    }
+    function stopShared() {
+      if (!running) return;
+      running = false;
+      clearInterval(pollTimer); pollTimer = null;
+      LOG.info('company alerts stopped');
+    }
+    function activate(key) {
+      active[key] = true;
+      startShared();
+    }
+    function deactivate(key) {
+      delete active[key];
+      if (!anyActive()) stopShared();
+    }
+    DEBUG_PANELS.push({
+      title: 'Company alerts',
+      buttons: [
+        { label: 'Test apply alert', run: function () { raiseApply(['Test Applicant']); } },
+        { label: 'Test leave alert', run: function () { raiseLeave(['Test Employee']); } },
+        { label: 'Force poll', run: function () { poll(true); } },
+        { label: 'Reset baseline', run: function () {
+            // Forces the next poll to treat everything currently present as
+            // "already known" again — useful after testing, so real
+            // applicants/employees don't immediately fire a stale alert.
+            knownApps = null; knownEmployees = null;
+            PLATFORM.storage.remove(SK.knownApps);
+            PLATFORM.storage.remove(SK.knownEmployees);
+            LOG.info('company: baseline cleared, next poll re-seeds it');
+          } }
+      ],
+      text: function () {
+        return 'active:         ' + JSON.stringify(active) + '\n' +
+               'known apps:     ' + (knownApps ? knownApps.length : '(no baseline yet)') + '\n' +
+               'known employees:' + (knownEmployees ? Object.keys(knownEmployees).length : '(no baseline yet)') + '\n' +
+               'last stats:     ' + JSON.stringify(lastStats);
+      }
+    });
+    return {
+      activate: activate,
+      deactivate: deactivate,
+      applyLiveValue: function () {
+        if (lastStats.pendingKnown === null) return null;
+        return lastStats.pendingKnown + ' known';
+      },
+      leaveLiveValue: function () {
+        if (lastStats.hired === null) return null;
+        return lastStats.hired + '/' + lastStats.capacity + ' staff';
+      }
+    };
+  })();
+  REGISTRY.register({
+    id: 'co-apply',
+    name: 'New applications',
+    category: 'Company',
+    info: 'Alerts when someone new applies to your company — same flash-and-modal style ' +
+          'as the cooldown alerts, but Acknowledge-only (no snooze): a new application ' +
+          'only exists once, so there is nothing to re-remind about until another one ' +
+          'shows up. Detected by comparing application IDs between polls, not by their ' +
+          'status, since Torn does not appear to expose a distinct "pending" flag in a ' +
+          'way this has been confirmed against. Requires being able to see the ' +
+          'Applications tab yourself (Director/Manager or an equivalent company ' +
+          'position) — the API will simply return nothing useful otherwise.',
+    match: null,
+    defaultOn: false,
+    needsApiKey: true,
+    apiAccess: 'Minimal',
+    apiSelections: ['applications', 'profile'],
+    settings: [
+      { key: 'pollMin', label: 'Check every', unit: 'minutes', min: 1, max: 60, step: 1, def: 5 }
+    ],
+    liveValue: function () { return COMPANY.applyLiveValue(); },
+    init: function () {
+      COMPANY.activate('apply');
+      return function cleanup() { COMPANY.deactivate('apply'); };
+    }
+  });
+  REGISTRY.register({
+    id: 'co-leave',
+    name: 'Employee departures',
+    category: 'Company',
+    info: 'Alerts when someone leaves your company — same style as the applications ' +
+          'alert above, Acknowledge-only, no snooze. Detected by comparing the employee ' +
+          'roster between polls: anyone who was on it and no longer is counts as gone. ' +
+          'Shares one API call with the applications alert, so having both on costs no ' +
+          'extra requests. Requires the same company-position visibility as above.',
+    match: null,
+    defaultOn: false,
+    needsApiKey: true,
+    apiAccess: 'Minimal',
+    apiSelections: ['applications', 'profile'],
+    settings: [
+      { key: 'pollMin', label: 'Check every', unit: 'minutes', min: 1, max: 60, step: 1, def: 5 }
+    ],
+    liveValue: function () { return COMPANY.leaveLiveValue(); },
+    init: function () {
+      COMPANY.activate('leave');
+      return function cleanup() { COMPANY.deactivate('leave'); };
+    }
+  });
+  /* ==========================================================================
    * SECTION 13 — FEATURE: placeholders
    * Empty slots so the UI has something to test against. Delete freely.
    * ======================================================================== */
@@ -5352,6 +5593,7 @@
         inspect: INSPECT,
         watchlist: WATCHLIST,
         todo: TODO,
+        company: COMPANY,
         race: RACE,
         away: AWAY,
         icons: STATUS_ICONS,
