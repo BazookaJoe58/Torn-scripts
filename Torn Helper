@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Helper
 // @namespace    cam.torn.tools
-// @version      78
+// @version      79
 // @description  All-in-one helper. Modular features with individual on/off toggles. Includes Cooldown Alerts (drug, booster, education, OC, racing). Works on Tampermonkey (PC) and Torn PDA (mobile).
 // @author       Cam
 // @updateURL    https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/refs/heads/main/Torn%20Helper
@@ -69,7 +69,7 @@
   const CONFIG = {
     scriptName: 'Torn Helper',
     scriptShort: 'TH',
-    version: '78',
+    version: '79',
     logLevel: 'info',        // debug | info | warn | error | silent
     logBufferSize: 400,
     storageKeys: {
@@ -200,6 +200,10 @@
         knownApps: 'th.co.apps.v1',
         knownEmployees: 'th.co.emp.v1'
       }
+    },
+    // ---- Chat buttons tunables ---------------------------------------------
+    chat: {
+      storageKeys: { buttons: 'th.chat.buttons.v1' }
     },
     // ---- Cooldown Alerts tunables -----------------------------------------
     cooldowns: {
@@ -782,6 +786,14 @@
     // raise an alert without its Acknowledge/Off wiring being applied to them.
     let currentCtx = null;
     let onAck = null, onSnooze = null, onOff = null, onGo = null;
+    // ---- queue -------------------------------------------------------------
+    // If a second alert becomes true while one is already on screen, it used
+    // to just silently overwrite the first one — whichever fired most
+    // recently won the modal and the earlier one could go unhandled. Now it
+    // queues instead: each alert gets its own turn, deduped by key so a
+    // poller that keeps calling show() for the same still-true condition
+    // doesn't pile up duplicate entries.
+    let queue = [];
     function ctxOr(name, fallback) {
       return (currentCtx && typeof currentCtx[name] === 'function') ? currentCtx[name] : fallback;
     }
@@ -858,7 +870,9 @@
       });
       LOG.debug('alert overlay built');
     }
-    function show(key, color, heading, reason, link, ctx) {
+    // Does the actual work of putting an alert on screen. Only ever called
+    // when nothing else is currently showing — show() below decides that.
+    function _display(key, color, heading, reason, link, ctx) {
       build();
       currentKey = key;
       currentCtx = ctx || null;
@@ -897,16 +911,51 @@
       }, CONFIG.cooldowns.flashMs);
       LOG.info('alert raised:', key, '-', reason);
     }
+    // Public entry point. If nothing is showing, displays immediately. If
+    // something else is already up, queues this one (or refreshes it in
+    // place if it's the SAME alert re-firing on a later poll tick, or
+    // already sitting in the queue — either way, no duplicate entries pile
+    // up from a poller calling show() repeatedly for one still-true alert).
+    function show(key, color, heading, reason, link, ctx) {
+      if (currentKey === null) {
+        _display(key, color, heading, reason, link, ctx);
+        return;
+      }
+      if (currentKey === key) {
+        // Same alert already on screen — just refresh its text, don't requeue.
+        currentLabel = heading || currentLabel;
+        currentLink = link || currentLink;
+        currentCtx = ctx || currentCtx;
+        if (modalWrap) modalWrap.querySelector('.th-cd-mwhy').textContent = reason || '';
+        return;
+      }
+      const existing = queue.filter(function (q) { return q.key === key; })[0];
+      if (existing) {
+        existing.color = color; existing.heading = heading; existing.reason = reason;
+        existing.link = link; existing.ctx = ctx;
+      } else {
+        queue.push({ key: key, color: color, heading: heading, reason: reason, link: link, ctx: ctx });
+        LOG.info('alert queued behind', currentKey + ':', key, '(' + queue.length + ' waiting)');
+      }
+    }
     function stop() {
       if (flashTimer) { clearInterval(flashTimer); flashTimer = null; }
       if (overlay) overlay.style.backgroundColor = 'transparent';
-      if (modalWrap) modalWrap.style.display = 'none';
       currentKey = null;
       currentLabel = '';
       currentLink = null;
       currentCtx = null;
+      // Hand the modal straight to the next queued alert, if any, instead of
+      // just closing it — each one still gets its own Ack/Snooze/Off turn.
+      if (queue.length) {
+        const next = queue.shift();
+        _display(next.key, next.color, next.heading, next.reason, next.link, next.ctx);
+      } else if (modalWrap) {
+        modalWrap.style.display = 'none';
+      }
     }
     function destroy() {
+      queue = [];
       stop();
       if (overlay) { overlay.remove(); overlay = null; }
       if (modalWrap) { modalWrap.remove(); modalWrap = null; }
@@ -4685,6 +4734,273 @@
     }
   });
   /* ==========================================================================
+   * SECTION 12d — FEATURE: CHAT BUTTONS
+   *
+   * Custom one-click buttons above the message box in every open chat
+   * window, each pasting a preset message. Design reference was a 3rd-party
+   * script ("Torn.com Enhanced Chat Buttons" by Callz) but its selectors are
+   * stale against the current Torn build, so only its idea (per-window
+   * buttons, {name} placeholder, a button config editor) carried over —
+   * every selector here comes from a real capture against the live page.
+   *
+   * Two anchors turned out to be stable where the obvious ones (hashed CSS
+   * module classes like `header___FgvBi`) are not:
+   *   - the textarea itself: `textarea.tt-chat-autocomplete` (confirmed).
+   *   - the header's Close icon: `svg[aria-label="Close"]` (confirmed on a
+   *     1-on-1 chat window; assumed — not yet confirmed — to also be present
+   *     on channel windows like Trade/Faction, since it reads as generic
+   *     window chrome rather than something DM-specific. If buttons don't
+   *     show up in a channel window, this is the first thing to check).
+   * From there: walking up from the textarea to the nearest ancestor that
+   * contains a Close icon gives "this window's own container" without
+   * needing to know anything about the structure in between, and that same
+   * container's header button's trimmed textContent gives the window's
+   * title (Trade / Faction / Company / Global / Hospital / a player's name
+   * for a 1-on-1) — again without depending on the hashed span class, since
+   * the title text is the only visible text inside that button.
+   *
+   * Reading the page live (not the API) is deliberate, matching this
+   * project's rule of thumb: this only ever needs to work while you are
+   * looking at an open chat window, so there is nothing an API call would
+   * add here that the page itself doesn't already show.
+   * ======================================================================== */
+  const CHATBTN = (function () {
+    let handled = new WeakSet();
+    let observer = null, debTimer = null;
+    let editorEl = null, editIndex = -1;
+    function loadConfig() { return PLATFORM.storage.get(CONFIG.chat.storageKeys.buttons, []); }
+    function saveConfig(list) { PLATFORM.storage.set(CONFIG.chat.storageKeys.buttons, list); }
+    /* ---- setting the textarea's value so Torn's own React state notices --
+     * Assigning .value directly and dispatching a plain 'input' event is not
+     * always enough for a React-controlled input — React tracks the last
+     * value it saw through the real prototype setter, so a bare assignment
+     * can leave it thinking nothing changed. Going through the native
+     * HTMLTextAreaElement setter first (bypassing anything React may have
+     * patched onto the instance) keeps that tracker honest.
+     * ---------------------------------------------------------------------- */
+    function reactSetTextareaValue(ta, value) {
+      const desc = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
+      if (desc && desc.set) { desc.set.call(ta, value); } else { ta.value = value; }
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      ta.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    function findContainer(ta) {
+      let node = ta.parentElement, depth = 0;
+      while (node && depth < 14) {
+        if (node.querySelector && node.querySelector('svg[aria-label="Close"]')) return node;
+        node = node.parentElement;
+        depth++;
+      }
+      return null;
+    }
+    function windowTitle(container) {
+      if (!container) return '';
+      const closeSvg = container.querySelector('svg[aria-label="Close"]');
+      const btn = closeSvg && closeSvg.closest('button');
+      return btn ? btn.textContent.trim() : '';
+    }
+    function insertRow(ta, title) {
+      const cfgs = loadConfig().filter(function (c) {
+        const list = String(c.match || '').split(',')
+          .map(function (s) { return s.trim().toLowerCase(); }).filter(Boolean);
+        if (!list.length) return true;
+        return !!title && list.indexOf(title.toLowerCase()) !== -1;
+      });
+      if (!cfgs.length) return;
+      const row = document.createElement('div');
+      row.className = 'th-root th-chatbtn-row';
+      cfgs.forEach(function (cfg) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'th-btn';
+        b.textContent = cfg.label || 'Send';
+        b.addEventListener('click', function () {
+          LOG.guard('chatbtn.click', function () {
+            const msg = String(cfg.message || '').split('{name}').join(title || '');
+            reactSetTextareaValue(ta, msg);
+            ta.focus();
+            LOG.info('chat button pasted:', cfg.label, '-> window:', title || '(unknown)');
+          });
+        });
+        row.appendChild(b);
+      });
+      ta.parentNode.insertBefore(row, ta);
+    }
+    function scan() {
+      if (!loadConfig().length) return;
+      const textareas = document.querySelectorAll('#chatRoot textarea.tt-chat-autocomplete');
+      textareas.forEach(function (ta) {
+        if (handled.has(ta)) return;
+        handled.add(ta);
+        LOG.guard('chatbtn.scan.window', function () {
+          insertRow(ta, windowTitle(findContainer(ta)));
+        });
+      });
+    }
+    function scheduleScan() {
+      clearTimeout(debTimer);
+      debTimer = setTimeout(scan, 250);
+    }
+    // Called after the editor adds/edits/deletes a button, so every chat
+    // window already open picks up the change immediately.
+    function rerenderAll() {
+      document.querySelectorAll('.th-chatbtn-row').forEach(function (r) { r.remove(); });
+      handled = new WeakSet();
+      scan();
+    }
+    /* ---- config editor (floating, GhostWarning-style popup) --------------- */
+    function closeEditor() {
+      if (editorEl) { editorEl.remove(); editorEl = null; }
+      editIndex = -1;
+    }
+    function clearForm() {
+      if (!editorEl) return;
+      editIndex = -1;
+      editorEl.querySelector('#th-cbtn-label').value = '';
+      editorEl.querySelector('#th-cbtn-match').value = '';
+      editorEl.querySelector('#th-cbtn-msg').value = '';
+      editorEl.querySelector('[data-cbtn-save]').textContent = 'Add button';
+    }
+    function loadIntoForm(idx) {
+      const c = loadConfig()[idx];
+      if (!c || !editorEl) return;
+      editIndex = idx;
+      editorEl.querySelector('#th-cbtn-label').value = c.label || '';
+      editorEl.querySelector('#th-cbtn-match').value = c.match || '';
+      editorEl.querySelector('#th-cbtn-msg').value = c.message || '';
+      editorEl.querySelector('[data-cbtn-save]').textContent = 'Save changes';
+    }
+    function renderEditorList() {
+      if (!editorEl) return;
+      const listEl = editorEl.querySelector('#th-cbtn-list');
+      const cfgs = loadConfig();
+      listEl.innerHTML = cfgs.length ? cfgs.map(function (c, i) {
+        return '<div class="th-cbtn-item">' +
+          '<div class="th-cbtn-item-main">' +
+          '<div class="th-cbtn-item-label">' + UTIL.escapeHtml(c.label || '') + '</div>' +
+          '<div class="th-cbtn-item-sub">' + UTIL.escapeHtml(c.match ? c.match : 'all windows') + '</div>' +
+          '<div class="th-cbtn-item-msg">' + UTIL.escapeHtml(c.message || '') + '</div>' +
+          '</div>' +
+          '<div class="th-cbtn-item-actions">' +
+          '<button class="th-btn" data-cbtn-edit="' + i + '">Edit</button>' +
+          '<button class="th-btn danger" data-cbtn-del="' + i + '">Delete</button>' +
+          '</div></div>';
+      }).join('') : '<div class="th-empty">No chat buttons yet.</div>';
+      listEl.querySelectorAll('[data-cbtn-edit]').forEach(function (b) {
+        b.addEventListener('click', function () { loadIntoForm(Number(b.dataset.cbtnEdit)); });
+      });
+      listEl.querySelectorAll('[data-cbtn-del]').forEach(function (b) {
+        b.addEventListener('click', function () {
+          const cfgs2 = loadConfig();
+          cfgs2.splice(Number(b.dataset.cbtnDel), 1);
+          saveConfig(cfgs2);
+          LOG.info('chat button deleted');
+          clearForm();
+          renderEditorList();
+          rerenderAll();
+        });
+      });
+    }
+    function openEditor() {
+      if (editorEl) return;
+      editorEl = document.createElement('div');
+      editorEl.className = 'th-root th-cbtn-overlay';
+      editorEl.innerHTML =
+        '<div class="th-cbtn-panel">' +
+        '<div class="th-h4">Chat button editor</div>' +
+        '<div id="th-cbtn-list" class="th-cbtn-list"></div>' +
+        '<hr class="th-cbtn-hr">' +
+        '<input class="th-search" id="th-cbtn-label" type="text" placeholder="Button label, e.g. GL">' +
+        '<input class="th-search" id="th-cbtn-match" type="text" ' +
+        'placeholder="Show in windows titled (comma-separated, blank = all)" style="margin-top:8px">' +
+        '<textarea class="th-cbtn-textarea" id="th-cbtn-msg" placeholder="' +
+        'Message to paste. Use {name} for the window’s title (handy for a player’s name in a 1-on-1 chat)."></textarea>' +
+        '<div class="th-btns">' +
+        '<button class="th-btn acc" data-cbtn-save="1">Add button</button>' +
+        '<button class="th-btn" data-cbtn-cancel="1">Clear form</button>' +
+        '<button class="th-btn" data-cbtn-close="1">Close</button>' +
+        '</div>' +
+        '</div>';
+      document.body.appendChild(editorEl);
+      editorEl.querySelector('[data-cbtn-save]').addEventListener('click', function () {
+        const label = editorEl.querySelector('#th-cbtn-label').value.trim();
+        const match = editorEl.querySelector('#th-cbtn-match').value.trim();
+        const message = editorEl.querySelector('#th-cbtn-msg').value;
+        if (!label || !message) { LOG.warn('chat button save skipped — label and message are required'); return; }
+        const cfgs = loadConfig();
+        const entry = {
+          id: (editIndex >= 0 && cfgs[editIndex]) ? cfgs[editIndex].id
+              : (Date.now() + '-' + Math.random().toString(36).slice(2, 7)),
+          label: label, match: match, message: message
+        };
+        if (editIndex >= 0 && cfgs[editIndex]) { cfgs[editIndex] = entry; } else { cfgs.push(entry); }
+        saveConfig(cfgs);
+        LOG.info('chat button saved:', label);
+        clearForm();
+        renderEditorList();
+        rerenderAll();
+      });
+      editorEl.querySelector('[data-cbtn-cancel]').addEventListener('click', clearForm);
+      editorEl.querySelector('[data-cbtn-close]').addEventListener('click', closeEditor);
+      renderEditorList();
+    }
+    function renderPanel(container) {
+      container.innerHTML =
+        '<div class="th-pad">' +
+        '<div class="th-h4">Chat buttons</div>' +
+        '<p class="th-note">Adds your own one-click buttons above the message box in every open ' +
+        'chat window, filtered to whichever windows you assign each one to. Use <code>{name}</code> ' +
+        'in a message to insert that window’s title.</p>' +
+        '<div class="th-btns"><button class="th-btn acc" data-cbtn-open="1">Open button editor</button></div>' +
+        '</div>';
+      container.querySelector('[data-cbtn-open]').addEventListener('click', openEditor);
+    }
+    function start() {
+      scan();
+      const root = document.getElementById('chatRoot');
+      if (root) {
+        observer = new MutationObserver(function () { LOG.guard('chatbtn.observe', scheduleScan); });
+        observer.observe(root, { childList: true, subtree: true });
+      }
+      LOG.info('chat buttons watching for open windows');
+      return function cleanup() {
+        if (observer) { observer.disconnect(); observer = null; }
+        clearTimeout(debTimer);
+        document.querySelectorAll('.th-chatbtn-row').forEach(function (r) { r.remove(); });
+        handled = new WeakSet();
+        closeEditor();
+        LOG.info('chat buttons stopped');
+      };
+    }
+    return {
+      renderPanel: renderPanel,
+      start: start,
+      summary: function () {
+        const n = loadConfig().length;
+        return n ? (n + ' button' + (n === 1 ? '' : 's')) : 'none set up';
+      }
+    };
+  })();
+  REGISTRY.register({
+    id: 'chat-buttons',
+    name: 'Chat buttons',
+    category: 'Chat',
+    info: 'Adds your own custom one-click buttons above the textarea in every open chat window ' +
+          '(Trade, Faction, Company, Global, Hospital, or a 1-on-1 chat) — each pastes a preset ' +
+          'message, filtered to whichever window titles you assign it to. Configured through its ' +
+          'own editor (Open button editor, reachable whether this is switched on or off), not the ' +
+          'usual Settings tab. Reads Torn\'s own chat page live while you have it open — no API calls.',
+    match: null,
+    defaultOn: false,
+    needsApiKey: false,
+    apiAccess: null,
+    apiSelections: [],
+    floatable: false,
+    liveValue: function () { return CHATBTN.summary(); },
+    panel: CHATBTN.renderPanel,
+    init: function () { return CHATBTN.start(); }
+  });
+  /* ==========================================================================
    * SECTION 13 — FEATURE: placeholders
    * Empty slots so the UI has something to test against. Delete freely.
    * ======================================================================== */
@@ -5022,6 +5338,35 @@
   .th-trade-glow { animation:th-trade-pulse 1.1s ease-in-out infinite; }
   .th-trade-container { position:static !important; display:flex; flex-wrap:wrap;
     gap:6px; margin:6px 0; align-items:center; }
+  .th-note { color:var(--th-dim); font-size:11px; line-height:1.4; margin:0 0 10px; }
+  .th-note code { color:var(--th-fg); background:var(--th-bg2); padding:1px 4px; border-radius:3px; }
+  /* ---- chat buttons ----
+   * .th-chatbtn-row is inserted directly above the textarea in each open
+   * chat window (SECTION 12d CHATBTN) — plain sibling insertion, so it needs
+   * no knowledge of Torn's own wrapper classes around the textarea.
+   * The rest here is the floating button-config editor (GhostWarning-style
+   * popup, restyled to the dark theme rather than a separate look).
+   */
+  .th-chatbtn-row { display:flex; flex-wrap:wrap; gap:6px; margin:4px 0; }
+  .th-chatbtn-row .th-btn { font-size:11px; padding:3px 8px; }
+  .th-cbtn-overlay { position:fixed; inset:0; z-index:2147483000; display:flex;
+    align-items:center; justify-content:center; background:rgba(0,0,0,.55); }
+  .th-cbtn-panel { width:min(92vw, 420px); max-height:86vh; overflow:auto;
+    background:var(--th-bg); color:var(--th-fg); border:1px solid var(--th-line);
+    border-radius:10px; padding:14px; box-shadow:0 12px 34px rgba(0,0,0,.6); font-size:12px; }
+  .th-cbtn-list { max-height:220px; overflow:auto; margin:8px 0; }
+  .th-cbtn-item { display:flex; justify-content:space-between; gap:8px; align-items:flex-start;
+    padding:6px 0; border-bottom:1px solid var(--th-line); }
+  .th-cbtn-item-main { min-width:0; }
+  .th-cbtn-item-label { font-weight:700; }
+  .th-cbtn-item-sub { font-size:10px; color:var(--th-dim); }
+  .th-cbtn-item-msg { font-size:11px; color:var(--th-dim); max-width:220px; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; }
+  .th-cbtn-item-actions { display:flex; gap:4px; flex:none; }
+  .th-cbtn-hr { border:0; border-top:1px solid var(--th-line); margin:10px 0; }
+  .th-cbtn-textarea { width:100%; min-height:70px; margin:8px 0; padding:8px;
+    background:var(--th-bg2); color:var(--th-fg); border:1px solid var(--th-line);
+    border-radius:6px; font-size:12px; resize:vertical; font-family:inherit; }
   `;
   /* ==========================================================================
    * SECTION 15 — UI
@@ -5904,6 +6249,7 @@
         tradeAlert: TRADE_ALERT,
         tradeMoney: TRADE_MONEY,
         sound: SOUND,
+        chatButtons: CHATBTN,
         race: RACE,
         away: AWAY,
         icons: STATUS_ICONS,
