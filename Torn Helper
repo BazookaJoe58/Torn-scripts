@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Helper
 // @namespace    cam.torn.tools
-// @version      80
+// @version      81
 // @description  All-in-one helper. Modular features with individual on/off toggles. Includes Cooldown Alerts (drug, booster, education, OC, racing). Works on Tampermonkey (PC) and Torn PDA (mobile).
 // @author       Cam
 // @updateURL    https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/refs/heads/main/Torn%20Helper
@@ -69,7 +69,7 @@
   const CONFIG = {
     scriptName: 'Torn Helper',
     scriptShort: 'TH',
-    version: '80',
+    version: '81',
     logLevel: 'info',        // debug | info | warn | error | silent
     logBufferSize: 400,
     storageKeys: {
@@ -4763,10 +4763,25 @@
    * project's rule of thumb: this only ever needs to work while you are
    * looking at an open chat window, so there is nothing an API call would
    * add here that the page itself doesn't already show.
+   *
+   * The button row is NOT inserted into Torn's own DOM as a sibling of the
+   * textarea — that was the original approach, but Torn's chat input turned
+   * out to be one horizontal flex row (search field, textarea, send icon
+   * all inline), so the inserted row just became another squeezed flex item
+   * and overlapped the textarea instead of sitting above it. Since the
+   * structure around the textarea was never confirmed by a clean capture
+   * (see the project status doc), the row instead floats independently —
+   * position:fixed, appended to <body>, and repositioned on a short timer
+   * from the textarea's own getBoundingClientRect() — which works correctly
+   * regardless of how Torn's input row is actually built, and keeps
+   * tracking correctly if a chat window is dragged around the page.
    * ======================================================================== */
   const CHATBTN = (function () {
-    let handled = new WeakSet();
-    let observer = null, debTimer = null;
+    // ta -> row element (or null for a window with no matching buttons, so
+    // it isn't rebuilt on every scan). Not a WeakSet: reposition() below
+    // needs to iterate every tracked window on a timer.
+    let active = new Map();
+    let observer = null, debTimer = null, posTimer = null;
     let editorEl = null, editIndex = -1;
     function loadConfig() { return PLATFORM.storage.get(CONFIG.chat.storageKeys.buttons, []); }
     function saveConfig(list) { PLATFORM.storage.set(CONFIG.chat.storageKeys.buttons, list); }
@@ -4799,14 +4814,28 @@
       const btn = closeSvg && closeSvg.closest('button');
       return btn ? btn.textContent.trim() : '';
     }
-    function insertRow(ta, title) {
+    /* ---- floating, not inserted into Torn's own layout --------------------
+     * Earlier this inserted the row as a DOM sibling directly before the
+     * textarea, on the assumption that would simply appear above it. Turned
+     * out Torn's chat input is one horizontal flex row (search field,
+     * textarea, send icon all inline) — a real capture of the ancestor
+     * structure was never obtained (see the section comment above), so this
+     * assumption was wrong, and the row became just another squeezed flex
+     * item instead of sitting above the textarea, overlapping it.
+     * Fix: don't join that layout at all. The row is appended to <body>
+     * with position:fixed and repositioned on a timer to track the
+     * textarea's actual on-screen top edge (reposition(), below) — correct
+     * no matter how Torn's own input row is built, and unaffected by
+     * dragging/resizing a chat window.
+     * ---------------------------------------------------------------------- */
+    function buildRow(ta, title) {
       const cfgs = loadConfig().filter(function (c) {
         const list = String(c.match || '').split(',')
           .map(function (s) { return s.trim().toLowerCase(); }).filter(Boolean);
         if (!list.length) return true;
         return !!title && list.indexOf(title.toLowerCase()) !== -1;
       });
-      if (!cfgs.length) return;
+      if (!cfgs.length) return null;
       const row = document.createElement('div');
       row.className = 'th-root th-chatbtn-row';
       cfgs.forEach(function (cfg) {
@@ -4824,18 +4853,42 @@
         });
         row.appendChild(b);
       });
-      ta.parentNode.insertBefore(row, ta);
+      document.body.appendChild(row);
+      return row;
     }
+    // Runs on a short timer (not just on scroll/resize) so a chat window
+    // being dragged around the page — which fires neither of those — still
+    // keeps its button row correctly tracked above it.
+    function reposition() {
+      active.forEach(function (row, ta) {
+        if (!ta.isConnected) {
+          if (row) row.remove();
+          active.delete(ta);
+          return;
+        }
+        if (!row) return;
+        const rect = ta.getBoundingClientRect();
+        if (!rect.width || !rect.height) { row.style.display = 'none'; return; }
+        row.style.display = '';
+        row.style.width = rect.width + 'px';
+        row.style.left = rect.left + 'px';
+        const h = row.offsetHeight || 30;
+        row.style.top = Math.max(0, rect.top - h - 4) + 'px';
+      });
+    }
+    function startPosLoop() { if (!posTimer) posTimer = setInterval(reposition, 150); }
+    function stopPosLoop() { clearInterval(posTimer); posTimer = null; }
     function scan() {
       if (!loadConfig().length) return;
       const textareas = document.querySelectorAll('#chatRoot textarea.tt-chat-autocomplete');
       textareas.forEach(function (ta) {
-        if (handled.has(ta)) return;
-        handled.add(ta);
+        if (active.has(ta)) return;
         LOG.guard('chatbtn.scan.window', function () {
-          insertRow(ta, windowTitle(findContainer(ta)));
+          const title = windowTitle(findContainer(ta));
+          active.set(ta, buildRow(ta, title));
         });
       });
+      reposition();
     }
     function scheduleScan() {
       clearTimeout(debTimer);
@@ -4844,8 +4897,8 @@
     // Called after the editor adds/edits/deletes a button, so every chat
     // window already open picks up the change immediately.
     function rerenderAll() {
-      document.querySelectorAll('.th-chatbtn-row').forEach(function (r) { r.remove(); });
-      handled = new WeakSet();
+      active.forEach(function (row) { if (row) row.remove(); });
+      active = new Map();
       scan();
     }
     /* ---- config editor (floating, GhostWarning-style popup) --------------- */
@@ -4959,6 +5012,7 @@
     }
     function start() {
       scan();
+      startPosLoop();
       const root = document.getElementById('chatRoot');
       if (root) {
         observer = new MutationObserver(function () { LOG.guard('chatbtn.observe', scheduleScan); });
@@ -4968,8 +5022,9 @@
       return function cleanup() {
         if (observer) { observer.disconnect(); observer = null; }
         clearTimeout(debTimer);
-        document.querySelectorAll('.th-chatbtn-row').forEach(function (r) { r.remove(); });
-        handled = new WeakSet();
+        stopPosLoop();
+        active.forEach(function (row) { if (row) row.remove(); });
+        active = new Map();
         closeEditor();
         LOG.info('chat buttons stopped');
       };
@@ -5343,14 +5398,18 @@
   .th-note { color:var(--th-dim); font-size:11px; line-height:1.4; margin:0 0 10px; }
   .th-note code { color:var(--th-fg); background:var(--th-bg2); padding:1px 4px; border-radius:3px; }
   /* ---- chat buttons ----
-   * .th-chatbtn-row is inserted directly above the textarea in each open
-   * chat window (SECTION 12d CHATBTN) — plain sibling insertion, so it needs
-   * no knowledge of Torn's own wrapper classes around the textarea.
+   * .th-chatbtn-row floats above each open chat window's textarea —
+   * position:fixed, repositioned on a timer from the textarea's own
+   * getBoundingClientRect() (SECTION 12d CHATBTN's reposition()) — rather
+   * than being inserted into Torn's own layout, since Torn's chat input
+   * turned out to be one horizontal flex row and a plain sibling insert
+   * squeezed into it instead of sitting above it.
    * The rest here is the floating button-config editor (GhostWarning-style
    * popup, restyled to the dark theme rather than a separate look).
    */
-  .th-chatbtn-row { display:flex; flex-wrap:wrap; gap:6px; margin:4px 0; }
-  .th-chatbtn-row .th-btn { font-size:11px; padding:3px 8px; }
+  .th-chatbtn-row { position:fixed; z-index:2147482900; display:flex; flex-wrap:wrap;
+    gap:6px; pointer-events:none; }
+  .th-chatbtn-row .th-btn { font-size:11px; padding:3px 8px; pointer-events:auto; }
   .th-cbtn-overlay { position:fixed; inset:0; z-index:2147483000; display:flex;
     align-items:center; justify-content:center; background:rgba(0,0,0,.55); }
   .th-cbtn-panel { width:min(92vw, 420px); max-height:86vh; overflow:auto;
