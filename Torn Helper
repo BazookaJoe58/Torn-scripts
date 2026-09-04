@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Helper
 // @namespace    cam.torn.tools
-// @version      81
+// @version      82
 // @description  All-in-one helper. Modular features with individual on/off toggles. Includes Cooldown Alerts (drug, booster, education, OC, racing). Works on Tampermonkey (PC) and Torn PDA (mobile).
 // @author       Cam
 // @updateURL    https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/refs/heads/main/Torn%20Helper
@@ -69,7 +69,7 @@
   const CONFIG = {
     scriptName: 'Torn Helper',
     scriptShort: 'TH',
-    version: '81',
+    version: '82',
     logLevel: 'info',        // debug | info | warn | error | silent
     logBufferSize: 400,
     storageKeys: {
@@ -4745,7 +4745,15 @@
    *
    * Two anchors turned out to be stable where the obvious ones (hashed CSS
    * module classes like `header___FgvBi`) are not:
-   *   - the textarea itself: `textarea.tt-chat-autocomplete` (confirmed).
+   *   - the textarea itself: `placeholder="Type your message here..."`.
+   *     (Originally matched on the `tt-chat-autocomplete` class instead —
+   *     confirmed present on a chat with prior history, but a real capture
+   *     from a brand-new, never-messaged conversation showed that class
+   *     missing entirely on that window's textarea, apparently only
+   *     attached once Torn's mentions/autocomplete feature initializes for
+   *     that conversation. The placeholder text was identical in both
+   *     captures, so that's the anchor now — `tt-chat-autocomplete` is kept
+   *     as an alternate match in case it helps, but nothing depends on it.)
    *   - the header's Close icon: `svg[aria-label="Close"]` (confirmed on a
    *     1-on-1 chat window; assumed — not yet confirmed — to also be present
    *     on channel windows like Trade/Faction, since it reads as generic
@@ -4880,7 +4888,14 @@
     function stopPosLoop() { clearInterval(posTimer); posTimer = null; }
     function scan() {
       if (!loadConfig().length) return;
-      const textareas = document.querySelectorAll('#chatRoot textarea.tt-chat-autocomplete');
+      // Matched on placeholder text, not the tt-chat-autocomplete class —
+      // that class is missing on a brand-new conversation's textarea until
+      // Torn's mentions/autocomplete feature initializes for it. The class
+      // is kept in the selector too, purely as a harmless alternate match.
+      const textareas = document.querySelectorAll(
+        '#chatRoot textarea.tt-chat-autocomplete, ' +
+        '#chatRoot textarea[placeholder="Type your message here..."]'
+      );
       textareas.forEach(function (ta) {
         if (active.has(ta)) return;
         LOG.guard('chatbtn.scan.window', function () {
