@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Helper
 // @namespace    cam.torn.tools
-// @version      79
+// @version      80
 // @description  All-in-one helper. Modular features with individual on/off toggles. Includes Cooldown Alerts (drug, booster, education, OC, racing). Works on Tampermonkey (PC) and Torn PDA (mobile).
 // @author       Cam
 // @updateURL    https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/refs/heads/main/Torn%20Helper
@@ -69,7 +69,7 @@
   const CONFIG = {
     scriptName: 'Torn Helper',
     scriptShort: 'TH',
-    version: '79',
+    version: '80',
     logLevel: 'info',        // debug | info | warn | error | silent
     logBufferSize: 400,
     storageKeys: {
@@ -4878,7 +4878,7 @@
         return '<div class="th-cbtn-item">' +
           '<div class="th-cbtn-item-main">' +
           '<div class="th-cbtn-item-label">' + UTIL.escapeHtml(c.label || '') + '</div>' +
-          '<div class="th-cbtn-item-sub">' + UTIL.escapeHtml(c.match ? c.match : 'all windows') + '</div>' +
+          '<div class="th-cbtn-item-sub">shows in: ' + UTIL.escapeHtml(c.match ? c.match : 'all windows') + '</div>' +
           '<div class="th-cbtn-item-msg">' + UTIL.escapeHtml(c.message || '') + '</div>' +
           '</div>' +
           '<div class="th-cbtn-item-actions">' +
@@ -4910,11 +4910,13 @@
         '<div class="th-h4">Chat button editor</div>' +
         '<div id="th-cbtn-list" class="th-cbtn-list"></div>' +
         '<hr class="th-cbtn-hr">' +
-        '<input class="th-search" id="th-cbtn-label" type="text" placeholder="Button label, e.g. GL">' +
-        '<input class="th-search" id="th-cbtn-match" type="text" ' +
-        'placeholder="Show in windows titled (comma-separated, blank = all)" style="margin-top:8px">' +
+        '<div class="th-cbtn-flabel">Button label (what shows on the button)</div>' +
+        '<input class="th-search" id="th-cbtn-label" type="text" placeholder="e.g. GL">' +
+        '<div class="th-cbtn-flabel">Only show in these chat windows — leave blank to show in every window</div>' +
+        '<input class="th-search" id="th-cbtn-match" type="text" placeholder="e.g. Trade, Faction (comma-separated)">' +
+        '<div class="th-cbtn-flabel">Message to paste — use {name} for the window’s title</div>' +
         '<textarea class="th-cbtn-textarea" id="th-cbtn-msg" placeholder="' +
-        'Message to paste. Use {name} for the window’s title (handy for a player’s name in a 1-on-1 chat)."></textarea>' +
+        'e.g. Hey {name}, thanks for the trade!"></textarea>' +
         '<div class="th-btns">' +
         '<button class="th-btn acc" data-cbtn-save="1">Add button</button>' +
         '<button class="th-btn" data-cbtn-cancel="1">Clear form</button>' +
@@ -5364,6 +5366,8 @@
     text-overflow:ellipsis; white-space:nowrap; }
   .th-cbtn-item-actions { display:flex; gap:4px; flex:none; }
   .th-cbtn-hr { border:0; border-top:1px solid var(--th-line); margin:10px 0; }
+  .th-cbtn-flabel { font-size:10px; color:var(--th-dim); margin:8px 0 3px; }
+  .th-cbtn-flabel:first-of-type { margin-top:0; }
   .th-cbtn-textarea { width:100%; min-height:70px; margin:8px 0; padding:8px;
     background:var(--th-bg2); color:var(--th-fg); border:1px solid var(--th-line);
     border-radius:6px; font-size:12px; resize:vertical; font-family:inherit; }
