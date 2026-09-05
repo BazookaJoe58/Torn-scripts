@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Helper
 // @namespace    cam.torn.tools
-// @version      82
+// @version      83
 // @description  All-in-one helper. Modular features with individual on/off toggles. Includes Cooldown Alerts (drug, booster, education, OC, racing). Works on Tampermonkey (PC) and Torn PDA (mobile).
 // @author       Cam
 // @updateURL    https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/refs/heads/main/Torn%20Helper
@@ -69,7 +69,7 @@
   const CONFIG = {
     scriptName: 'Torn Helper',
     scriptShort: 'TH',
-    version: '82',
+    version: '83',
     logLevel: 'info',        // debug | info | warn | error | silent
     logBufferSize: 400,
     storageKeys: {
@@ -769,6 +769,48 @@
     return { loop: loop, stop: stop, stopAll: stopAll, isPlaying: isPlaying };
   })();
   /* ==========================================================================
+   * SECTION 06c — TABSYNC (cross-tab alert sync)
+   *
+   * Every open Tampermonkey tab runs its own completely independent copy of
+   * this script — snoozing an alert in one tab never told any other open
+   * tab about it, so the same still-true condition (a cooldown ready, a
+   * watched player about to leave hospital) could pop its modal separately
+   * in every tab. This is a small broadcast bus so a feature module can tell
+   * its other-tab copies "this alert key was just handled" and have them
+   * react the same way, without needing anything heavier than localStorage,
+   * which every open tab on torn.com already shares.
+   *
+   * Mechanism: writing to a dedicated storage key fires the browser's native
+   * `storage` event in every OTHER same-origin tab (never the tab that wrote
+   * it) — exactly the delivery this needs, no custom messaging required.
+   * Each broadcast includes a fresh timestamp/nonce so two broadcasts for the
+   * same action+key still produce a distinct stored value and reliably fire
+   * the event (writing the identical value twice does not).
+   * ======================================================================== */
+  const TABSYNC = (function () {
+    const BKEY = 'th.tabsync.v1';
+    const listeners = [];
+    function broadcast(action, alertKey, extra) {
+      const msg = { action: action, key: alertKey, ts: Date.now(), nonce: Math.random() };
+      if (extra) { for (const k in extra) { if (extra.hasOwnProperty(k)) msg[k] = extra[k]; } }
+      PLATFORM.storage.set(BKEY, msg);
+      LOG.debug('tabsync broadcast:', action, alertKey);
+    }
+    window.addEventListener('storage', function (e) {
+      if (e.key !== BKEY || !e.newValue) return;
+      let msg = null;
+      try { msg = JSON.parse(e.newValue); } catch (err) { return; }
+      listeners.forEach(function (fn) {
+        LOG.guard('tabsync.listener', function () { fn(msg); });
+      });
+    });
+    // A feature module calls this once at startup with a function that
+    // checks msg.module before doing anything, so unrelated broadcasts from
+    // other features are cheap to ignore.
+    function onMessage(fn) { listeners.push(fn); }
+    return { broadcast: broadcast, onMessage: onMessage };
+  })();
+  /* ==========================================================================
    * SECTION 07 — FEATURE: COOLDOWN ALERTS
    *
    * Adapted from "Torn Cooldown & OC Sentinel" by BazookaJoe.
@@ -961,8 +1003,17 @@
       if (modalWrap) { modalWrap.remove(); modalWrap = null; }
       LOG.debug('alert overlay destroyed');
     }
+    // Removes one specific alert without running its Ack/Snooze callback —
+    // for when another tab has already handled this exact alert (via
+    // TABSYNC) and this tab just needs to stop showing/queueing it too.
+    // If it's the one currently on screen, this advances to whatever's
+    // queued next, same as a normal dismissal.
+    function dismiss(key) {
+      if (currentKey === key) { stop(); return; }
+      queue = queue.filter(function (q) { return q.key !== key; });
+    }
     return {
-      show: show, stop: stop, destroy: destroy,
+      show: show, stop: stop, destroy: destroy, dismiss: dismiss,
       setHandlers: function (ack, snooze, off, go) {
         onAck = ack; onSnooze = snooze; onOff = off; onGo = go;
       }
@@ -1196,9 +1247,25 @@
       saveSnooze();
       LOG.info('snoozed', key, 'for', Math.round(ms / 60000), 'min');
     }
+    /* ---- cross-tab sync ---------------------------------------------------
+     * Each open tab used to run this completely independently — snoozing a
+     * ready cooldown in one tab left it free to pop up again in every other
+     * tab. Ack/Snooze/Go now broadcast via TABSYNC so every other tab
+     * applies the same suppression and drops the alert if it's currently
+     * showing or queued there too. "Off" is deliberately not broadcast —
+     * disabling the feature only in the tab you're looking at is the safer
+     * default, since silently disabling it everywhere from one click felt
+     * like more than was asked for; say if you want that too.
+     * Go gets its own short buffer (10s) rather than the normal Snooze
+     * duration: the tab you clicked Go in is about to navigate away, so the
+     * other tabs just need a brief window to avoid firing again while you
+     * get where you're going — not a full 5-minute suppression.
+     * ---------------------------------------------------------------------- */
+    const GO_BUFFER_MS = 10000;
+    function broadcastCD(action, key) { TABSYNC.broadcast(action, key, { module: 'cd' }); }
     ALERT_UI.setHandlers(
-      function ack(key) { setSnooze(key, CC.ackMs); },
-      function snz(key) { setSnooze(key, CC.snoozeMs); },
+      function ack(key) { setSnooze(key, CC.ackMs); broadcastCD('ack', key); },
+      function snz(key) { setSnooze(key, CC.snoozeMs); broadcastCD('snooze', key); },
       // Turning it off goes through the registry, so the feature is properly
       // stopped and its switch in the panel reflects it — not just muted.
       function off(key) {
@@ -1209,8 +1276,14 @@
       },
       // Short snooze before navigating. Without it the alert re-fires as soon
       // as the destination page loads and the script starts up again there.
-      function go(key) { if (key) setSnooze(key, CC.snoozeMs); }
+      function go(key) { if (key) { setSnooze(key, CC.snoozeMs); broadcastCD('go', key); } }
     );
+    TABSYNC.onMessage(function (msg) {
+      if (!msg || msg.module !== 'cd' || !msg.key) return;
+      if (msg.action === 'ack') { setSnooze(msg.key, CC.ackMs); ALERT_UI.dismiss(msg.key); }
+      else if (msg.action === 'snooze') { setSnooze(msg.key, CC.snoozeMs); ALERT_UI.dismiss(msg.key); }
+      else if (msg.action === 'go') { setSnooze(msg.key, GO_BUFFER_MS); ALERT_UI.dismiss(msg.key); }
+    });
     function raise(key, reason) {
       if (!active[key]) { LOG.debug('alert suppressed, feature off:', key); return; }
       if (snoozed(key)) { LOG.debug('alert suppressed, snoozed:', key); return; }
@@ -1798,6 +1871,24 @@
     // Which releases have already been announced, keyed by id+until so the
     // same person is not announced twice for the same hospital stay.
     const announced = {};
+    // ---- cross-tab sync ----------------------------------------------------
+    // Each player's release already has its own key ('wl:'+id), so unlike
+    // cooldowns there is nothing to merge — a different person's alert is
+    // never affected by this, only the exact same person's, in whichever
+    // other tabs also have them on the watchlist.
+    function broadcastWL(action, id) { TABSYNC.broadcast(action, 'wl:' + id, { module: 'wl', id: id }); }
+    TABSYNC.onMessage(function (msg) {
+      if (!msg || msg.module !== 'wl' || msg.id == null) return;
+      const r = records[msg.id];
+      const tag = msg.id + ':' + (r ? r.until : '');
+      if (msg.action === 'ack') {
+        announced[tag] = true;
+        ALERT_UI.dismiss('wl:' + msg.id);
+      } else if (msg.action === 'snooze') {
+        setTimeout(function () { announced[tag] = false; }, 5 * 60000);
+        ALERT_UI.dismiss('wl:' + msg.id);
+      }
+    });
     // The bazaar add button is a sub-option of this feature rather than its
     // own toggle, since it is useless without the watchlist running.
     let bazaarStop = null;
@@ -2115,10 +2206,15 @@
           {
             featureId: 'mug-hospwatch',
             // Acknowledge and snooze just suppress this one person's release.
-            onAck: function () { announced[tag] = true; },
+            // (Snooze used to also reset announced[tag] to false right away,
+            // on top of the delayed reset below — that undid the snooze
+            // instantly, so the very next check re-fired the same alert
+            // again. That immediate line was the bug: only the delayed
+            // reset should run.)
+            onAck: function () { announced[tag] = true; broadcastWL('ack', id); },
             onSnooze: function () {
-              announced[tag] = false;
               setTimeout(function () { announced[tag] = false; }, 5 * 60000);
+              broadcastWL('snooze', id);
             }
           }
         );
@@ -4554,6 +4650,20 @@
       if (mins === null) mins = CC.pollMinDefault;
       return mins * 60000;
     }
+    // ---- cross-tab sync ----------------------------------------------------
+    // Acknowledging in one tab dismisses the same alert in every other open
+    // tab too. Note this only covers the modal itself — each tab still polls
+    // the API independently and decides "new" by comparing against its own
+    // knownApps/knownEmployees list, so it is still possible (if a tab has
+    // gone a while without polling) for it to alert again for the exact same
+    // applicant/departure later, even though it was already acknowledged
+    // elsewhere. Fully closing that gap would mean tabs sharing poll state,
+    // not just sharing the acknowledgement — a bigger change than this one.
+    function broadcastCompany(action, key) { TABSYNC.broadcast(action, key, { module: 'company' }); }
+    TABSYNC.onMessage(function (msg) {
+      if (!msg || msg.module !== 'company' || !msg.key) return;
+      if (msg.action === 'ack') ALERT_UI.dismiss(msg.key);
+    });
     function raiseApply(names) {
       const list = names.join(', ');
       ALERT_UI.show('company-apply', 'rgba(94,230,168,0.5)', 'New company application',
@@ -4561,7 +4671,7 @@
         { url: 'https://www.torn.com/companies.php?step=your&type=1#/option=applications',
           label: 'Open applications' },
         { featureId: 'co-apply', hideSnooze: true, ackLabel: 'Acknowledge',
-          onAck: function () {} });
+          onAck: function () { broadcastCompany('ack', 'company-apply'); } });
     }
     function raiseLeave(names) {
       const list = names.join(', ');
@@ -4570,7 +4680,7 @@
         { url: 'https://www.torn.com/companies.php?step=your&type=1#/option=employees',
           label: 'Open employees' },
         { featureId: 'co-leave', hideSnooze: true, ackLabel: 'Acknowledge',
-          onAck: function () {} });
+          onAck: function () { broadcastCompany('ack', 'company-leave'); } });
     }
     function handleData(data) {
       const apps = data.applications || {};
@@ -6327,6 +6437,7 @@
         tradeAlert: TRADE_ALERT,
         tradeMoney: TRADE_MONEY,
         sound: SOUND,
+        tabsync: TABSYNC,
         chatButtons: CHATBTN,
         race: RACE,
         away: AWAY,
