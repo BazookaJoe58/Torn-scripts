@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Helper
 // @namespace    cam.torn.tools
-// @version      83
-// @description  All-in-one helper. Modular features with individual on/off toggles. Includes Cooldown Alerts (drug, booster, education, OC, racing). Works on Tampermonkey (PC) and Torn PDA (mobile).
+// @version      84
+// @description  All-in-one helper. Modular features with individual on/off toggles. Includes Cooldown Alerts (drug, booster, education, OC, racing) and a Blackjack advisor. Works on Tampermonkey (PC) and Torn PDA (mobile).
 // @author       Cam
 // @updateURL    https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/refs/heads/main/Torn%20Helper
 // @downloadURL  https://raw.githubusercontent.com/BazookaJoe58/Torn-scripts/refs/heads/main/Torn%20Helper
@@ -17,7 +17,22 @@
  *  CREDITS
  *    Cooldown Alerts is adapted from "Torn Cooldown & OC Sentinel" by
  *    BazookaJoe. The racing detection approach is adapted from
- *    "Torn City Race Alert" by Krimian.
+ *    "Torn City Race Alert" by Krimian. The Blackjack advisor is adapted
+ *    from the "Torn BJ Strategy" userscript, with its strategy rebuilt for
+ *    Torn's exact rules.
+ *
+ *  API KEY & DATA  (Torn API Terms of Service disclosure)
+ *    Data storage ..... Only in this browser's localStorage (settings, cached
+ *                       results, and your key if you type one in). Nothing is
+ *                       stored anywhere else.
+ *    Data sharing ..... None. The only requests go to api.torn.com.
+ *    Purpose of use ... Personal alerts, timers and advice for the features you
+ *                       switch on. No game actions are automated.
+ *    Key storage ...... localStorage on this device, or PDA's own key on Torn
+ *                       PDA. Sent only to api.torn.com, never shared.
+ *    Key access level . The lowest level your enabled features need, shown in
+ *                       the panel: most need Public or Minimal; the Blackjack
+ *                       bet sizer needs Limited (money, stocks).
  *
  *  FILE MAP  (search for "SECTION")
  *    SECTION 01  CONFIG ............ constants and tunables
@@ -41,6 +56,8 @@
  *    SECTION 12  FEATURE: PAGE INSPECTOR (developer)
  *    SECTION 12b FEATURE: GENERAL (to-do list)
  *    SECTION 12c FEATURE: COMPANY (applications + departures)
+ *    SECTION 12d FEATURE: CHAT BUTTONS
+ *    SECTION 12e FEATURE: CASINO (blackjack advisor + bet sizer)
  *    SECTION 13  FEATURE: placeholders
  *    SECTION 14  STYLES
  *    SECTION 15  UI
@@ -53,6 +70,7 @@
  *    TH.cd.raceDebug()          dump every racing-ish element on the page
  *    TH.cd.poll()               force an API sweep now
  *    TH.report()                full debug report, ready to paste
+ *    TH.bj.bestPlay([6,5], 4)   blackjack advice for a hand (A = 1)
  *
  * ========================================================================== */
 (function () {
@@ -69,7 +87,7 @@
   const CONFIG = {
     scriptName: 'Torn Helper',
     scriptShort: 'TH',
-    version: '83',
+    version: '84',
     logLevel: 'info',        // debug | info | warn | error | silent
     logBufferSize: 400,
     storageKeys: {
@@ -5183,6 +5201,677 @@
     init: function () { return CHATBTN.start(); }
   });
   /* ==========================================================================
+   * SECTION 12e — FEATURE: CASINO (blackjack advisor + bet sizer)
+   *
+   * Adapted from the standalone "Torn BJ Strategy" userscript (v2.1.0), with
+   * the strategy rebuilt for Torn's exact rules and wired into the helper's
+   * shared key, storage, http and logging.
+   *
+   * Torn's rules, from the Torn wiki and Cam's own game logs:
+   *   8 decks, dealer stands on all 17s, NO dealer peek (a dealer blackjack
+   *   also takes doubles and splits), early surrender (50% back even against
+   *   a dealer blackjack), double any first two cards, double after split, no
+   *   re-split, split aces can be hit and A+10 on a split pays 3:2, and a
+   *   6-Card Charlie beats everything except blackjack.
+   *
+   * The tables below are the exact best play for those rules (worked out
+   * hand by hand, not copied from a generic chart). Perfect play is worth
+   * about +0.4% per hand to the player. The old script's surrender rows were
+   * wrong and cost about 0.6% per hand.
+   *
+   * Page facts (from a Torn Helper page report of the PC page, 2026-11-15):
+   *   - cards: .dealer-cards / .player-cards  .cards > div, card class like
+   *     card-hearts-8 (same as PDA)
+   *   - bet box: .input-money-group > input.bet.input-money[type=text] plus a
+   *     hidden input[name=bet] that holds the number Torn actually submits
+   *   - buttons are images with image maps (no text), so nothing here reads
+   *     the buttons to decide what is allowed — it applies the rules instead
+   *   - split hands are played one after the other as separate games, with
+   *     "You have split" (.casino-msg-wrap .right.msg) showing during the first
+   *
+   * NOT YET VERIFIED against a capture (per "never guess DOM or API"):
+   *   - the dealt-card class names on PC (assumed card-hearts-8, as on PDA)
+   *   - the v1 user money/stocks and torn stocks field names (money_onhand,
+   *     vault_amount, total_shares, current_price; v2 names also accepted).
+   *     Debug tab -> "Dump blackjack state" lists the field names Torn sent.
+   *
+   * Advice and prefill only: it can type a number into the bet box, but you
+   * press every button yourself.
+   * ======================================================================== */
+  const BJ = (function () {
+    const FID = 'casino-bj';
+    const KEYS = { pos: 'th.bj.pos.v1', session: 'th.bj.session.v1', cache: 'th.bj.cache.v1' };
+    const USER_POLL_MS = 15000;    // wallet / vault / shares
+    const PRICE_POLL_MS = 60000;   // share prices only move once a minute
+
+    /* ---- strategy --------------------------------------------------------
+     * Each row is 10 letters for dealer upcard A,2,3,4,5,6,7,8,9,10.
+     * H hit, S stand, D double, P split, R surrender.
+     * ------------------------------------------------------------------ */
+    const T = {
+      FIRST_HARD: {
+        5: 'HHHHHHHHHH', 6: 'RHHHHHHHHH', 7: 'RHHHHHHHHH', 8: 'HHHHHHHHHH',
+        9: 'HHDDDDHHHH', 10: 'HDDDDDDDDH', 11: 'HDDDDDDDDH', 12: 'RHHSSSHHHH',
+        13: 'RSSSSSHHHH', 14: 'RSSSSSHHHR', 15: 'RSSSSSHHHR', 16: 'RSSSSSHHRR',
+        17: 'RSSSSSSSSS', 18: 'SSSSSSSSSS', 19: 'SSSSSSSSSS', 20: 'SSSSSSSSSS'
+      },
+      FIRST_SOFT: {
+        13: 'HHHHHDHHHH', 14: 'HHHHDDHHHH', 15: 'HHHHDDHHHH', 16: 'HHHDDDHHHH',
+        17: 'HHDDDDHHHH', 18: 'HSDDDDSSHH', 19: 'SSSSSSSSSS', 20: 'SSSSSSSSSS'
+      },
+      PAIRS: {
+        2: 'HPPPPPPHHH', 3: 'RHPPPPPHHH', 4: 'HHHHPPHHHH', 5: 'HDDDDDDDDH',
+        6: 'RPPPPPHHHH', 7: 'RPPPPPPHHR', 8: 'RPPPPPPPPR', 9: 'SPPPPPSPPS',
+        10: 'SSSSSSSSSS', 11: 'PPPPPPPPPP'
+      },
+      SPLIT_HARD: {
+        4: 'HHHHHHHHHH', 5: 'HHHHHHHHHH', 6: 'HHHHHHHHHH', 7: 'HHHHHHHHHH',
+        8: 'HHHHHHHHHH', 9: 'HHDDDDHHHH', 10: 'HDDDDDDDDH', 11: 'HDDDDDDDDH',
+        12: 'HHHSSSHHHH', 13: 'HSSSSSHHHH', 14: 'HSSSSSHHHH', 15: 'HSSSSSHHHH',
+        16: 'HSSSSSHHHH', 17: 'SSSSSSSSSS', 18: 'SSSSSSSSSS', 19: 'SSSSSSSSSS',
+        20: 'SSSSSSSSSS'
+      },
+      SPLIT_SOFT: {
+        12: 'HHHHHHHHHH', 13: 'HHHHHDHHHH', 14: 'HHHHDDHHHH', 15: 'HHHHDDHHHH',
+        16: 'HHHDDDHHHH', 17: 'HHDDDDHHHH', 18: 'HSDDDDSSHH', 19: 'SSSSSSSSSS',
+        20: 'SSSSSSSSSS', 21: 'SSSSSSSSSS'
+      },
+      // 3-5 card hands: only the rows that differ from "hit below 12 (soft 18),
+      // stand above". They change with card count because of the Charlie.
+      MC3_HARD: { 12: 'HHHSSSHHHH', 13: 'HSSSSSHHHH', 14: 'HSSSSSHHHH', 15: 'HSSSSSHHHH', 16: 'HSSSSSHHHH' },
+      MC3_SOFT: { 18: 'HSSSSSSSHH' },
+      MC4_HARD: { 12: 'HHHHHHHHHH', 13: 'HHSSSSHHHH', 14: 'HSSSSSHHHH', 15: 'HSSSSSHHHH', 16: 'HSSSSSHHHH' },
+      MC4_SOFT: { 18: 'HHHHHHSHHH', 19: 'SSSSSSSSSH' },
+      MC5_HARD: { 12: 'HHHHHHHHHH', 13: 'HHHHHHHHHH', 14: 'HHHHHHHHHH', 15: 'HHHHHHHHHH', 16: 'HHHSSSHHHH', 17: 'HSSSSSSSHH' },
+      MC5_SOFT: { 18: 'HHHHHHHHHH', 19: 'HHHHHHHHHH', 20: 'HHHHHHHHHH' }
+    };
+    // Card values: 1 = ace, 2-10 (J/Q/K = 10)
+    function handTotal(cards) {
+      let total = 0, aces = 0;
+      cards.forEach(function (c) { total += c; if (c === 1) aces++; });
+      const soft = aces > 0 && total + 10 <= 21;
+      return { total: soft ? total + 10 : total, soft: soft };
+    }
+    function bestPlay(cards, up, splitHand) {
+      const n = cards.length;
+      const ht = handTotal(cards), total = ht.total, soft = ht.soft;
+      const col = up === 1 ? 0 : up - 1;
+      if (total > 21) return { action: 'BUST', note: '' };
+      if (n >= 6) return { action: 'CHARLIE', note: '6-Card Charlie: beats everything but blackjack' };
+      if (n === 2 && total === 21) {
+        return { action: 'BJ', note: splitHand ? 'A+10 on a split pays 3:2' : 'Pays 3:2 unless the dealer also has blackjack' };
+      }
+      if (total === 21) return { action: 'S', note: '' };
+      let row;
+      if (n === 2) {
+        if (splitHand) row = (soft ? T.SPLIT_SOFT : T.SPLIT_HARD)[total];
+        else if (cards[0] === cards[1]) row = T.PAIRS[cards[0] === 1 ? 11 : cards[0]];
+        else row = (soft ? T.FIRST_SOFT : T.FIRST_HARD)[total];
+      } else {
+        const k = Math.min(n, 5);
+        row = T['MC' + k + (soft ? '_SOFT' : '_HARD')][total];
+        if (!row) row = (soft ? total < 18 : total < 12) ? 'HHHHHHHHHH' : 'SSSSSSSSSS';
+      }
+      if (!row) row = total >= 17 ? 'SSSSSSSSSS' : 'HHHHHHHHHH';
+      const action = row[col];
+      let note = '';
+      if (action === 'S' && n >= 3 && n <= 5 && total < 17) note = n + ' cards: stand';
+      if (action === 'H' && n >= 4 && total >= 13) note = 'Chasing the 6-Card Charlie';
+      if (action === 'R') note = 'Get half your bet back';
+      if (n === 2 && !splitHand && up === 1) note = (note ? note + ' · ' : '') + 'Never take insurance';
+      return { action: action, note: note };
+    }
+
+    /* ---- money sources + bet size ---------------------------------------- */
+    const cached = PLATFORM.storage.get(KEYS.cache, {}) || {};
+    const money = {
+      wallet: typeof cached.wallet === 'number' ? cached.wallet : null,
+      vault: typeof cached.vault === 'number' ? cached.vault : null,
+      stocks: Array.isArray(cached.stocks) ? cached.stocks : [],
+      updated: cached.updated || 0,
+      error: ''
+    };
+    let priceCache = null, priceAt = 0, fetching = false;
+    // Torn API rules: a bad key must not be retried (repeated invalid-key calls
+    // can earn a temporary IP ban), and a rate limit means back off.
+    //   error 2  invalid key       -> stop until the key changes
+    //   error 16 access too low    -> stop until the key changes
+    //   error 5  too many requests -> pause 60 s
+    let stoppedForKey = null, pausedUntil = 0, lastShapes = null;
+    function apiAllowed() {
+      if (!PLATFORM.hasApiKey()) return false;
+      if (stoppedForKey !== null && stoppedForKey === PLATFORM.apiKey()) return false;
+      return Date.now() >= pausedUntil;
+    }
+    function pick(a, b) { return a !== undefined && a !== null ? a : b; }
+    function fmt(n) { return (n === null || n === undefined || isNaN(n)) ? '—' : '$' + Math.round(n).toLocaleString('en-US'); }
+    function fmtShort(n) {
+      if (n === null || n === undefined || isNaN(n)) return '—';
+      const a = Math.abs(n), s = n < 0 ? '-' : '';
+      if (a >= 1e9) return s + '$' + (a / 1e9).toFixed(2) + 'b';
+      if (a >= 1e6) return s + '$' + (a / 1e6).toFixed(1) + 'm';
+      if (a >= 1e3) return s + '$' + (a / 1e3).toFixed(0) + 'k';
+      return s + '$' + Math.round(a);
+    }
+    // Same source the trade cash alert reads: live, no API call
+    function walletFromPage() {
+      const elx = document.getElementById('user-money');
+      if (!elx) return null;
+      const d = elx.getAttribute('data-money');
+      if (d && !isNaN(+d)) return +d;
+      const t = (elx.textContent || '').replace(/[^0-9]/g, '');
+      return t ? +t : null;
+    }
+    function checkedMap() { return SETTINGS.getVal(FID, 'sources', {}) || {}; }
+    function pct() { const v = parseFloat(SETTINGS.getVal(FID, 'pct', '')); return isFinite(v) && v > 0 ? v : 0; }
+    function sources() {
+      const w = walletFromPage();
+      const list = [
+        { id: 'wallet', label: 'Wallet', value: w !== null ? w : money.wallet },
+        { id: 'vault', label: 'PI Vault', value: money.vault }
+      ];
+      money.stocks.forEach(function (st) {
+        list.push({ id: 'stock_' + st.id, label: st.acr || st.name || ('Stock ' + st.id), title: st.name, value: st.value });
+      });
+      // A ticked share you've since sold still shows (as —) so it can be unticked
+      const chk = checkedMap();
+      Object.keys(chk).forEach(function (id) {
+        if (chk[id] && /^stock_/.test(id) && !list.some(function (s) { return s.id === id; })) {
+          list.push({ id: id, label: 'Stock ' + id.slice(6) + ' (not held)', value: null });
+        }
+      });
+      return list;
+    }
+    // Tri-state: if any ticked source is unknown (not loaded yet, API paused,
+    // share no longer held) the pool is unknown — never a partial total that
+    // would quietly under-size the bet.
+    function missingSources() {
+      const chk = checkedMap();
+      const have = {};
+      sources().forEach(function (s) { have[s.id] = s; });
+      return Object.keys(chk).filter(function (id) {
+        return chk[id] && (!have[id] || have[id].value === null || have[id].value === undefined);
+      });
+    }
+    function poolTotal() {
+      const chk = checkedMap();
+      if (missingSources().length) return null;
+      let sum = 0, any = false;
+      sources().forEach(function (s) {
+        if (chk[s.id]) { sum += s.value; any = true; }
+      });
+      return any ? sum : null;
+    }
+    function betAmount() {
+      const p = pct(), pool = poolTotal();
+      if (!p || pool === null) return null;
+      return Math.floor(pool * p / 100 / 1000) * 1000;   // round down to $1,000
+    }
+    // Only the vault and shares need the API; the wallet comes off the page.
+    function needsApi() {
+      const chk = checkedMap();
+      return Object.keys(chk).some(function (k) { return chk[k] && k !== 'wallet'; });
+    }
+    function refreshMoney(force) {
+      if (fetching || !apiAllowed()) { renderMoney(); return Promise.resolve(); }
+      fetching = true;
+      setStatus('Updating…');
+      const key = encodeURIComponent(PLATFORM.apiKey());
+      const wantPrices = force || !priceCache || Date.now() - priceAt >= PRICE_POLL_MS;
+      return Promise.all([
+        PLATFORM.getJSON('https://api.torn.com/user/?selections=money,stocks&key=' + key),
+        wantPrices ? PLATFORM.getJSON('https://api.torn.com/torn/?selections=stocks&key=' + key) : Promise.resolve(priceCache)
+      ]).then(function (res) {
+        const u = res[0], t = res[1];
+        if (wantPrices) { priceCache = t; priceAt = Date.now(); }
+        // Field names only (no values) for the Debug dump, so the response
+        // shape can be checked against a real capture.
+        const firstStock = function (o) {
+          const v = Array.isArray(o) ? o[0] : (o && o[Object.keys(o)[0]]);
+          return v ? Object.keys(v) : [];
+        };
+        lastShapes = {
+          user: Object.keys(u || {}), userMoney: u && u.money ? Object.keys(u.money) : null,
+          userStock: firstStock(u && u.stocks), tornStock: firstStock(t && t.stocks)
+        };
+        const um = u.money || {};
+        money.wallet = pick(u.money_onhand, pick(um.wallet, money.wallet));
+        money.vault = pick(u.vault_amount, pick(um.vault, 0));
+        const prices = {};
+        Object.keys((t && t.stocks) || {}).forEach(function (k) {
+          const s = t.stocks[k];
+          prices[pick(s.stock_id, s.id)] = { price: pick(s.current_price, s.market && s.market.price), acr: s.acronym, name: s.name };
+        });
+        const owned = Array.isArray(u.stocks) ? u.stocks
+          : Object.keys(u.stocks || {}).map(function (k) { return u.stocks[k]; });
+        money.stocks = owned.map(function (s) {
+          const id = pick(s.stock_id, s.id), shares = pick(s.total_shares, pick(s.shares, 0));
+          const p = prices[id] || {};
+          return { id: id, acr: p.acr, name: p.name, shares: shares,
+                   value: (p.price !== undefined && p.price !== null) ? shares * p.price : null };
+        }).filter(function (s) { return s.shares > 0; })
+          .sort(function (a, b) { return (b.value || 0) - (a.value || 0); });
+        money.updated = Date.now();
+        money.error = '';
+        PLATFORM.storage.set(KEYS.cache, { wallet: money.wallet, vault: money.vault, stocks: money.stocks, updated: money.updated });
+      }).catch(function (e) {
+        const msg = e.message || String(e);
+        if (/error (2|16)\b/i.test(msg)) {
+          stoppedForKey = PLATFORM.apiKey();
+          if (/error 16/i.test(msg)) REGISTRY.flagAccessTooLow(FID);
+          money.error = (/error 16/i.test(msg) ? 'key access too low (needs Limited)' : 'key rejected') +
+            ' — paused until you save a different key';
+        } else if (/error 5\b/i.test(msg)) {
+          pausedUntil = Date.now() + 60000;
+          money.error = 'rate limited — pausing for a minute';
+        } else {
+          money.error = msg;
+        }
+        LOG.warn('bj: money refresh failed:', msg);
+      }).then(function () {
+        fetching = false;
+        renderMoney();
+        maybeFillBet();
+      });
+    }
+
+    /* ---- the bet box (types a number in, never presses Play) ------------- */
+    function gameRoot() { return document.querySelector('.blackjack-wrap') || document.querySelector('[class*="blackjack"]'); }
+    function isShown(el) { return !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length)); }
+    function findBetInputs() {
+      const root = gameRoot();
+      if (!root) return [];
+      const box = [].slice.call(root.querySelectorAll('input.bet.input-money:not([type="hidden"])')).filter(isShown)[0];
+      if (!box) return [];
+      const group = box.closest('.input-money-group') || box.parentElement;
+      return [box].concat([].slice.call(group.querySelectorAll('input[type="hidden"]')));
+    }
+    function setInput(el, value) {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(el, String(value));
+      ['input', 'change', 'keyup'].forEach(function (ev) { el.dispatchEvent(new Event(ev, { bubbles: true })); });
+    }
+    let lastFilled = null, lastFilledEl = null, boxWasShown = false;
+    function fillBet(force) {
+      const bet = betAmount();
+      const inputs = findBetInputs();
+      const justShown = inputs.length > 0 && !boxWasShown;   // bet box back between hands
+      boxWasShown = inputs.length > 0;
+      if (!bet || !inputs.length) return false;
+      const main = inputs[0];
+      if (!force && document.activeElement === main) return false;   // you're typing
+      // Refill only when the bet size changes or the box reappears, so a
+      // number you type yourself stays until then.
+      if (!force && !justShown && bet === lastFilled && main === lastFilledEl) return true;
+      inputs.forEach(function (el) { setInput(el, bet); });   // hidden one is what Torn submits
+      lastFilled = bet; lastFilledEl = main;
+      return true;
+    }
+    function maybeFillBet() {
+      if (SETTINGS.getVal(FID, 'autofill', true)) fillBet(false);
+      renderBet();
+    }
+
+    /* ---- reading the table ----------------------------------------------- */
+    function cardValue(el) {
+      const cls = typeof el.className === 'string' ? el.className : '';
+      const m = cls.match(/card-\w+-(10|[2-9]|[AJQK])\b/i);
+      if (!m) return 0;
+      const r = m[1].toUpperCase();
+      if (r === 'A') return 1;
+      if ('JQK'.indexOf(r) !== -1) return 10;
+      return parseInt(r, 10);
+    }
+    function readCards(sel) {
+      const root = gameRoot() || document;
+      const c = root.querySelector(sel);
+      if (!c) return [];
+      return [].slice.call(c.querySelectorAll('[class*="card-"]'))
+        .filter(function (el) { return cardValue(el) > 0; })
+        .filter(function (el) {   // innermost card element only
+          return ![].slice.call(el.querySelectorAll('[class*="card-"]')).some(function (x) { return cardValue(x) > 0; });
+        })
+        .map(cardValue);
+    }
+    function splitMessageShown() {
+      const root = gameRoot();
+      const el = root && root.querySelector('.casino-msg-wrap .right.msg');
+      if (!el) return false;
+      return getComputedStyle(el).display !== 'none' && /split/i.test(el.textContent || '') && isShown(el);
+    }
+
+    /* ---- hand state ------------------------------------------------------ */
+    const state = { prevCount: 0, prevSig: '', splitClicked: false, splitPhase: 0, last: null };
+    const session = PLATFORM.storage.get(KEYS.session, null) || { hands: 0, startPool: null };
+    function saveSession() { PLATFORM.storage.set(KEYS.session, session); }
+    function onNewHand() {
+      state.splitClicked = false;
+      state.splitPhase = 0;
+      session.hands++;
+      saveSession();
+      renderStats();
+    }
+    // Listens (only listens) for your button presses. PC buttons are images
+    // with image maps, so every label we can find is checked.
+    function onClick(e) {
+      const b = e.target && e.target.closest &&
+        e.target.closest('button, a, input, area, img, span.yes, span.no, [class*="btn"], [class*="button"]');
+      if (!b || b.closest('#th-bj')) return;
+      const map = b.closest('map');
+      const txt = [b.textContent, b.value, b.alt, b.title, b.className, b.getAttribute('data-step'),
+        b.getAttribute('href'), map && map.name, b.getAttribute('usemap')]
+        .filter(function (x) { return typeof x === 'string'; }).join(' ').toLowerCase();
+      if (/split/.test(txt)) state.splitClicked = true;
+      else if (/(^|\s)no(\s|$)/.test(txt.trim()) && b.closest('.split, .game-status-wrap')) state.splitClicked = false;
+      setTimeout(schedule, 50);
+    }
+    function tick() {
+      const upCards = readCards('.dealer-cards');
+      const up = upCards[0] || 0;
+      const hand = readCards('.player-cards');
+      const count = hand.length;
+      const sig = up + ':' + hand.slice(0, 2).join(',');
+      const splitMsg = splitMessageShown();
+      if (count > state.prevCount && state.prevCount >= 2) state.splitClicked = false;   // hit/double instead
+      // New deal: cards after an empty table, fewer cards than before, or a
+      // different two-card deal. After a split, the next deal is the second hand.
+      const newDeal = count >= 2 && (state.prevCount === 0 || count < state.prevCount ||
+        (count === 2 && state.prevCount === 2 && sig !== state.prevSig));
+      if (newDeal) {
+        if (state.splitPhase === 0 && (state.splitClicked || splitMsg)) state.splitPhase = 1;
+        else if (state.splitPhase === 1 && !splitMsg) state.splitPhase = 2;
+        else if (!(state.splitPhase === 1 && splitMsg)) onNewHand();
+        state.splitClicked = false;
+      } else if (state.splitPhase === 0 && splitMsg) {
+        state.splitPhase = 1;
+      }
+      state.prevCount = count;
+      state.prevSig = sig;
+      if (!up || count < 2) { state.last = null; updateAdvice(null); maybeFillBet(); return; }
+      const splitHand = state.splitPhase > 0;
+      const play = bestPlay(hand, up, splitHand);
+      const ht = handTotal(hand);
+      const kind = count === 2 && hand[0] === hand[1] && !splitHand ? 'pair' : ht.soft ? 'soft' : 'hard';
+      const info = (splitHand ? 'Split hand ' + state.splitPhase + ' of 2 · ' : '') + kind + ' ' + ht.total +
+        ' (' + hand.map(function (c) { return c === 1 ? 'A' : c; }).join(',') + ') vs ' + (up === 1 ? 'A' : up);
+      state.last = { up: up, hand: hand, splitPhase: state.splitPhase, action: play.action };
+      updateAdvice({ action: play.action, note: play.note, info: info });
+      maybeFillBet();
+    }
+    let queued = false;
+    function schedule() {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(function () { queued = false; LOG.guard('bj.tick', tick); });
+    }
+
+    /* ---- the on-page pill ------------------------------------------------ */
+    const META = {
+      H: ['HIT', 'h'], S: ['STAND', 's'], D: ['DOUBLE', 'd'], P: ['SPLIT', 'p'], R: ['SURRENDER', 'r'],
+      BJ: ['BLACKJACK', 'c'], CHARLIE: ['CHARLIE', 'c'], BUST: ['BUST', ''], UNKNOWN: ['?', '']
+    };
+    let pill = null, dragCleanup = null;
+    function $(id) { return pill ? pill.querySelector('#' + id) : null; }
+    function setStatus(t) { const el = $('th-bj-status'); if (el) el.textContent = t; }
+    function updateAdvice(r) {
+      if (!pill) return;
+      pill.classList.remove('bj-h', 'bj-s', 'bj-d', 'bj-p', 'bj-r', 'bj-c');
+      if (!r) {
+        $('th-bj-action').textContent = '---';
+        $('th-bj-note').textContent = '';
+        $('th-bj-info').textContent = 'Waiting for hand…';
+        return;
+      }
+      const m = META[r.action] || META.UNKNOWN;
+      if (m[1]) pill.classList.add('bj-' + m[1]);
+      $('th-bj-action').textContent = m[0];
+      $('th-bj-note').textContent = r.note || '';
+      $('th-bj-info').textContent = r.info || '';
+    }
+    let lastSourcesKey = '';
+    function renderMoney() {
+      const box = $('th-bj-sources');
+      if (!box) return;
+      const chk = checkedMap();
+      const list = sources();
+      const key = list.map(function (s) { return s.id; }).join('|');
+      if (key !== lastSourcesKey) {
+        box.innerHTML = list.map(function (s) {
+          return '<div class="th-bj-row"><label title="' + UTIL.escapeHtml(s.title || s.label) + '">' +
+            '<input type="checkbox" data-bjsrc="' + UTIL.escapeHtml(s.id) + '"' + (chk[s.id] ? ' checked' : '') + '> ' +
+            UTIL.escapeHtml(s.label) + '</label><span class="th-bj-val" data-bjval="' + UTIL.escapeHtml(s.id) + '"></span></div>';
+        }).join('');
+        lastSourcesKey = key;
+      }
+      list.forEach(function (s) {
+        const el = box.querySelector('[data-bjval="' + s.id + '"]');
+        if (el) el.textContent = fmtShort(s.value);
+      });
+      const st = $('th-bj-status');
+      if (st) {
+        if (money.error) st.innerHTML = '<span class="th-bj-err">API: ' + UTIL.escapeHtml(money.error) + '</span>';
+        else if (!PLATFORM.hasApiKey()) st.textContent = 'Add an API key for vault + shares';
+        else if (money.updated) st.textContent = 'Updated ' + new Date(money.updated).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      }
+      renderBet();
+    }
+    function renderBet() {
+      const pool = poolTotal(), bet = betAmount();
+      if (session.startPool === null && pool !== null) { session.startPool = pool; saveSession(); }
+      const miss = missingSources();
+      if ($('th-bj-pool')) $('th-bj-pool').textContent = miss.length ? 'waiting' : fmt(pool);
+      if ($('th-bj-fillstatus') && miss.length) {
+        $('th-bj-fillstatus').textContent = 'No bet until ' + miss.map(function (id) {
+          return id === 'vault' ? 'PI Vault' : id === 'wallet' ? 'Wallet' : 'a ticked share';
+        }).join(', ') + ' loads';
+      }
+      if ($('th-bj-bet')) $('th-bj-bet').textContent = fmt(bet);
+      const w = pill && pill.querySelector('[data-bjval="wallet"]');
+      if (w) w.textContent = fmtShort(sources()[0].value);
+      renderStats();
+    }
+    function renderStats() {
+      const el = $('th-bj-stats');
+      if (!el || el.style.display === 'none') return;
+      const pool = poolTotal();
+      const change = (pool !== null && session.startPool !== null) ? pool - session.startPool : null;
+      el.innerHTML =
+        '<div class="th-bj-row"><span>Hands this session</span><span class="th-bj-val">' + session.hands + '</span></div>' +
+        '<div class="th-bj-row"><span>Pool change</span><span class="th-bj-val ' +
+          (change === null ? '' : change >= 0 ? 'up' : 'down') + '">' +
+          (change === null ? '—' : (change >= 0 ? '+' : '') + fmtShort(change)) + '</span></div>' +
+        '<div class="th-bj-dim">Counts the ticked sources, so share price moves show up too.</div>' +
+        '<button class="th-bj-mini" data-bj="reset">reset session</button>';
+    }
+    function keyStatusText() {
+      if (PLATFORM.keyWasReplaced) return 'Using your PDA key';
+      return PLATFORM.hasApiKey() ? 'Using the Torn Helper key' : 'No key yet';
+    }
+    function buildPill() {
+      if (document.getElementById('th-bj')) return;
+      pill = document.createElement('div');
+      pill.id = 'th-bj';
+      pill.className = 'th-root th-bj';
+      pill.innerHTML =
+        '<div class="th-bj-head"><span>BJ Strategy</span><button class="th-bj-mini" data-bj="stats">stats</button></div>' +
+        '<div class="th-bj-main"><div id="th-bj-action">---</div><div id="th-bj-note"></div>' +
+        '<div id="th-bj-info">Waiting for hand…</div></div>' +
+        '<div id="th-bj-stats" style="display:none"></div>' +
+        '<details class="th-bj-sec"><summary>API key</summary><div class="th-bj-body">' +
+          (PLATFORM.keyWasReplaced ? '' :
+          '<input type="password" class="th-bj-input" id="th-bj-key" placeholder="Limited Access key" autocomplete="off">' +
+          '<div class="th-bj-row" style="margin-top:5px"><span></span><span>' +
+          '<button class="th-bj-btn" data-bj="keyclear">Clear</button> <button class="th-bj-btn" data-bj="keysave">Save</button></span></div>') +
+          '<div class="th-bj-dim" id="th-bj-keystatus"></div>' +
+          '<div class="th-bj-dim">Shared with the rest of Torn Helper. Needs Limited access (money, stocks).</div>' +
+        '</div></details>' +
+        '<details class="th-bj-sec"><summary>Bet size</summary><div class="th-bj-body">' +
+          '<div class="th-bj-row"><span>Bet % of pool</span><span><input type="number" min="0" step="0.01" class="th-bj-input pct" id="th-bj-pct" placeholder="0.33"> %</span></div>' +
+          '<div id="th-bj-sources"></div>' +
+          '<div class="th-bj-row th-bj-sum"><span>Pool</span><span class="th-bj-val" id="th-bj-pool">—</span></div>' +
+          '<div class="th-bj-betbox"><div class="th-bj-dim">Bet size</div><div class="th-bj-amt" id="th-bj-bet">—</div>' +
+          '<div class="th-bj-dim" id="th-bj-fillstatus"></div></div>' +
+          '<div class="th-bj-row" style="margin-top:6px"><label><input type="checkbox" id="th-bj-autofill"> Auto-fill bet box</label></div>' +
+          '<div class="th-bj-row"><button class="th-bj-btn" data-bj="refresh">Refresh</button><button class="th-bj-btn" data-bj="fill">Fill bet</button></div>' +
+          '<div class="th-bj-dim" id="th-bj-status"></div>' +
+        '</div></details>';
+      const pos = PLATFORM.storage.get(KEYS.pos, null);
+      document.body.appendChild(pill);
+      // top/left only: the shared drag helper clears `right` but not `bottom`
+      const x = (pos && typeof pos.x === 'number') ? pos.x : window.innerWidth - pill.offsetWidth - 20;
+      const y = (pos && typeof pos.y === 'number') ? pos.y : window.innerHeight - pill.offsetHeight - 90;
+      pill.style.left = Math.max(4, Math.min(window.innerWidth - pill.offsetWidth - 4, x)) + 'px';
+      pill.style.top = Math.max(4, Math.min(window.innerHeight - 60, y)) + 'px';
+      dragCleanup = UTIL.makeDraggable(pill, pill.querySelector('.th-bj-head'), function (p) {
+        PLATFORM.storage.set(KEYS.pos, p);
+      });
+      const keyIn = $('th-bj-key');
+      if (keyIn) keyIn.value = PLATFORM.keyWasReplaced ? '' : (PLATFORM.apiKey() || '');
+      $('th-bj-keystatus').textContent = keyStatusText();
+      $('th-bj-pct').value = SETTINGS.getVal(FID, 'pct', '') || '';
+      $('th-bj-autofill').checked = !!SETTINGS.getVal(FID, 'autofill', true);
+      pill.addEventListener('click', function (e) {
+        const b = e.target.closest('[data-bj]');
+        if (!b) return;
+        const act = b.getAttribute('data-bj');
+        if (act === 'stats') {
+          const s = $('th-bj-stats');
+          s.style.display = s.style.display === 'none' ? '' : 'none';
+          renderStats();
+        } else if (act === 'reset') {
+          session.hands = 0; session.startPool = poolTotal(); saveSession(); renderStats();
+        } else if (act === 'keysave') {
+          const k = keyIn.value.trim();
+          if (!/^[A-Za-z0-9]{16}$/.test(k)) { $('th-bj-keystatus').textContent = 'A key is 16 letters/numbers'; return; }
+          PLATFORM.setApiKey(k);
+          stoppedForKey = null; pausedUntil = 0; money.error = '';
+          $('th-bj-keystatus').textContent = 'Saved · ' + keyStatusText();
+          refreshMoney(true);
+        } else if (act === 'keyclear') {
+          PLATFORM.setApiKey(''); keyIn.value = '';
+          $('th-bj-keystatus').textContent = keyStatusText();
+        } else if (act === 'refresh') {
+          refreshMoney(true);
+        } else if (act === 'fill') {
+          const ok = fillBet(true);
+          $('th-bj-fillstatus').textContent = ok ? 'Filled' : (betAmount() ? 'Bet box not showing' : 'Set a % and tick a source');
+        }
+      });
+      $('th-bj-pct').addEventListener('input', function () {
+        SETTINGS.setVal(FID, 'pct', this.value);
+        lastFilled = null;
+        maybeFillBet();
+      });
+      $('th-bj-autofill').addEventListener('change', function () {
+        SETTINGS.setVal(FID, 'autofill', this.checked);
+        maybeFillBet();
+      });
+      $('th-bj-sources').addEventListener('change', function (e) {
+        const id = e.target.getAttribute && e.target.getAttribute('data-bjsrc');
+        if (!id) return;
+        const chk = checkedMap();
+        chk[id] = e.target.checked;
+        SETTINGS.setVal(FID, 'sources', chk);
+        lastFilled = null;
+        if (e.target.checked && id !== 'wallet' && !money.updated) refreshMoney(true);
+        maybeFillBet();
+      });
+      renderMoney();
+    }
+
+    /* ---- lifecycle -------------------------------------------------------- */
+    function start() {
+      buildPill();
+      const timers = [];
+      const gameObs = new MutationObserver(schedule);
+      let observed = null;
+      function attach() {
+        const root = gameRoot();
+        if (root && root !== observed) {
+          gameObs.disconnect();
+          gameObs.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style'] });
+          observed = root;
+          schedule();
+        }
+      }
+      attach();
+      timers.push(setInterval(attach, 1000));   // PDA can swap the game area out
+      // Wallet straight off the sidebar every 2 s (no API)
+      timers.push(setInterval(function () { LOG.guard('bj.wallet', maybeFillBet); }, 2000));
+      // Vault + shares every 15 s, only while the page is in view and only if
+      // something other than the wallet is ticked. Prices every 60 s.
+      timers.push(setInterval(function () {
+        if (!document.hidden && needsApi()) refreshMoney(false);
+      }, USER_POLL_MS));
+      function onVisible() { if (!document.hidden && needsApi()) refreshMoney(false); }
+      document.addEventListener('visibilitychange', onVisible);
+      document.addEventListener('click', onClick, true);
+      if (PLATFORM.hasApiKey()) refreshMoney(true);   // once, to list your shares
+      LOG.info('bj: advisor on');
+      return function cleanup() {
+        timers.forEach(clearInterval);
+        gameObs.disconnect();
+        document.removeEventListener('visibilitychange', onVisible);
+        document.removeEventListener('click', onClick, true);
+        if (dragCleanup) dragCleanup();
+        if (pill) pill.remove();
+        pill = null; lastSourcesKey = ''; boxWasShown = false;
+        LOG.info('bj: advisor off');
+      };
+    }
+    return {
+      start: start,
+      bestPlay: bestPlay,
+      handTotal: handTotal,
+      refresh: function () { return refreshMoney(true); },
+      liveValue: function () {
+        const b = betAmount();
+        return b ? 'bet ' + fmtShort(b) : null;
+      },
+      debugText: function () {
+        return 'BLACKJACK ADVISOR\n' +
+          'game area found: ' + !!gameRoot() + '\n' +
+          'dealer cards: ' + JSON.stringify(readCards('.dealer-cards')) + '\n' +
+          'player cards: ' + JSON.stringify(readCards('.player-cards')) + '\n' +
+          'split message showing: ' + splitMessageShown() + '\n' +
+          'state: ' + JSON.stringify(state) + '\n' +
+          'bet inputs found: ' + findBetInputs().length + '\n' +
+          'bet %: ' + pct() + ' | pool: ' + poolTotal() + ' | bet: ' + betAmount() + '\n' +
+          'ticked: ' + JSON.stringify(checkedMap()) + '\n' +
+          'money: ' + JSON.stringify({ wallet: money.wallet, vault: money.vault, stocks: money.stocks.length, updated: money.updated, error: money.error }) + '\n' +
+          'api: allowed=' + apiAllowed() + ' stoppedForKey=' + (stoppedForKey !== null) + ' pausedUntil=' + pausedUntil + '\n' +
+          'api response field names: ' + JSON.stringify(lastShapes) + '\n' +
+          'session: ' + JSON.stringify(session);
+      }
+    };
+  })();
+  DEBUG_PANELS.push({
+    title: 'Blackjack',
+    buttons: [
+      { label: 'Dump blackjack state', copy: function () { return BJ.debugText(); } }
+    ]
+  });
+  REGISTRY.register({
+    id: 'casino-bj',
+    name: 'Blackjack advisor',
+    category: 'Casino',
+    info: 'On the blackjack page, a small draggable box shows the best play for your hand, worked ' +
+          'out for Torn\'s exact rules (8 decks, no dealer peek, early surrender, 6-Card Charlie). ' +
+          'It knows double, surrender and split are first-move only, and that split hands are ' +
+          'played one after the other. The Bet size dropdown works out a % of whichever money ' +
+          'you tick (wallet, PI vault, each share holding) and types it into the bet box — you ' +
+          'still press Play yourself. The wallet is read off the page; the vault and shares need ' +
+          'a Limited key and refresh every 15 seconds while the page is open and something other ' +
+          'than the wallet is ticked. Best long-run bet size is about 0.33% of your pool.',
+    match: /sid=blackjack|step=blackjack/i,
+    defaultOn: false,
+    needsApiKey: false,
+    apiAccess: 'Limited',
+    apiSelections: ['money', 'stocks'],
+    liveValue: function () { return BJ.liveValue(); },
+    init: function () { return BJ.start(); }
+  });
+  /* ==========================================================================
    * SECTION 13 — FEATURE: placeholders
    * Empty slots so the UI has something to test against. Delete freely.
    * ======================================================================== */
@@ -5555,6 +6244,49 @@
   .th-cbtn-textarea { width:100%; min-height:70px; margin:8px 0; padding:8px;
     background:var(--th-bg2); color:var(--th-fg); border:1px solid var(--th-line);
     border-radius:6px; font-size:12px; resize:vertical; font-family:inherit; }
+  /* ---- blackjack advisor pill (SECTION 12e) ---- */
+  .th-bj { width:214px; border-radius:10px; overflow:hidden; color:var(--th-fg); font-size:11px;
+    background:rgba(20,19,23,.94); border:2px solid var(--th-line); box-shadow:0 6px 24px rgba(0,0,0,.6);
+    transition:border-color .2s, background-color .2s; z-index:2147482000; }
+  .th-bj-head { display:flex; align-items:center; justify-content:space-between; padding:5px 9px;
+    background:rgba(0,0,0,.45); cursor:move; user-select:none; touch-action:none;
+    font-size:9px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; color:var(--th-dim); }
+  .th-bj-mini { font-size:9px; color:var(--th-dim); background:none; border:1px solid var(--th-line);
+    border-radius:3px; padding:2px 5px; cursor:pointer; line-height:1; }
+  .th-bj-main { padding:12px 10px 10px; text-align:center; user-select:none; }
+  #th-bj-action { font-size:24px; font-weight:900; letter-spacing:.04em; line-height:1; color:var(--th-dim); }
+  #th-bj-note { font-size:10px; margin-top:5px; min-height:13px; color:var(--th-dim); line-height:1.3; }
+  #th-bj-info { font-size:10px; margin-top:6px; color:var(--th-dim); }
+  #th-bj-stats { padding:7px 9px 8px; border-top:1px solid rgba(255,255,255,.08); }
+  .th-bj-sec { border-top:1px solid rgba(255,255,255,.08); }
+  .th-bj-sec > summary { cursor:pointer; padding:6px 9px; color:var(--th-dim); font-weight:700; font-size:10px;
+    letter-spacing:.08em; text-transform:uppercase; list-style:none; user-select:none; }
+  .th-bj-sec > summary::-webkit-details-marker { display:none; }
+  .th-bj-sec > summary::before { content:'▸ '; }
+  .th-bj-sec[open] > summary::before { content:'▾ '; }
+  .th-bj-body { padding:0 9px 8px; }
+  .th-bj-row { display:flex; align-items:center; justify-content:space-between; gap:6px; margin-bottom:4px; }
+  .th-bj-row label { display:flex; align-items:center; gap:5px; min-width:0; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; cursor:pointer; }
+  .th-bj-sum { border-top:1px solid rgba(255,255,255,.08); padding-top:4px; }
+  .th-bj-val { font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .th-bj-val.up { color:var(--th-ok); }
+  .th-bj-val.down { color:var(--th-err); }
+  .th-bj-input { width:100%; background:var(--th-bg2); color:var(--th-fg); border:1px solid var(--th-line);
+    border-radius:4px; padding:4px 6px; font-size:12px; }
+  .th-bj-input.pct { width:70px; text-align:right; }
+  .th-bj-btn { background:var(--th-bg3); color:var(--th-fg); border:1px solid var(--th-line); border-radius:4px;
+    padding:4px 8px; font-size:11px; cursor:pointer; }
+  .th-bj-betbox { margin-top:6px; padding:6px; border-radius:6px; background:rgba(0,0,0,.35); text-align:center; }
+  .th-bj-amt { font-size:16px; font-weight:800; color:var(--th-acc); font-variant-numeric:tabular-nums; }
+  .th-bj-dim { color:var(--th-dim); font-size:10px; margin-top:2px; }
+  .th-bj-err { color:var(--th-err); }
+  .th-bj.bj-h { border-color:#f97316; background:rgba(120,45,0,.94); } .th-bj.bj-h #th-bj-action { color:#f97316; }
+  .th-bj.bj-s { border-color:#22c55e; background:rgba(15,60,25,.94); } .th-bj.bj-s #th-bj-action { color:#22c55e; }
+  .th-bj.bj-d { border-color:#3b82f6; background:rgba(15,30,80,.94); } .th-bj.bj-d #th-bj-action { color:#3b82f6; }
+  .th-bj.bj-p { border-color:#a855f7; background:rgba(45,10,70,.94); } .th-bj.bj-p #th-bj-action { color:#a855f7; }
+  .th-bj.bj-r { border-color:#ef4444; background:rgba(80,10,10,.94); } .th-bj.bj-r #th-bj-action { color:#ef4444; }
+  .th-bj.bj-c { border-color:#fbbf24; background:rgba(60,45,0,.94); }  .th-bj.bj-c #th-bj-action { color:#fbbf24; }
   `;
   /* ==========================================================================
    * SECTION 15 — UI
@@ -6439,6 +7171,7 @@
         sound: SOUND,
         tabsync: TABSYNC,
         chatButtons: CHATBTN,
+        bj: BJ,
         race: RACE,
         away: AWAY,
         icons: STATUS_ICONS,
